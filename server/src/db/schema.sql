@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS plan_dates (
   original_date TEXT NOT NULL,                            -- 规则原始推算日期
   postponed     INTEGER NOT NULL DEFAULT 0,
   weekday       INTEGER NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'pending',          -- pending | done（该日车票已购得/已有同车次）
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(plan_id, travel_date),
   FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE

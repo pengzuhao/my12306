@@ -279,7 +279,7 @@ export const PlanDatesRepo = {
     });
     tx();
   },
-  list(planId: string): { id: string; travelDate: string; originalDate: string; postponed: boolean; weekday: number }[] {
+  list(planId: string): { id: string; travelDate: string; originalDate: string; postponed: boolean; weekday: number; status: 'pending' | 'done' }[] {
     const rows = getDb()
       .prepare('SELECT * FROM plan_dates WHERE plan_id = ? ORDER BY travel_date ASC')
       .all(planId) as Record<string, unknown>[];
@@ -289,7 +289,12 @@ export const PlanDatesRepo = {
       originalDate: r.original_date as string,
       postponed: Boolean(r.postponed),
       weekday: r.weekday as number,
+      status: (r.status as 'pending' | 'done') ?? 'pending',
     }));
+  },
+  /** 标记某一天的车票已购得（查重命中或下单成功后调用） */
+  markDone(planId: string, travelDate: string): void {
+    getDb().prepare("UPDATE plan_dates SET status = 'done' WHERE plan_id = ? AND travel_date = ?").run(planId, travelDate);
   },
 };
 

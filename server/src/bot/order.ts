@@ -47,6 +47,8 @@ export interface PurchaseResult {
   payDeadline?: string;
   orderNo?: string;
   error?: string;
+  /** 查重命中：已购车票中已含目标车次，未实际下单，当日计划应标记完成 */
+  duplicated?: boolean;
 }
 
 function inTimeRange(depart: string, from?: string | null, to?: string | null): boolean {
@@ -93,6 +95,55 @@ function pickSeat(train: TrainInfo, positions?: string[] | null): { code: string
   // 保证能成单。实际下单席别由确认页原生字符串决定，这里只做"能否成单"的校验。
   const fallback = Object.entries(train.seats).find(([, v]) => seatCount(v) > 0);
   return fallback ? { code: 'OTHER', name: fallback[0] } : null;
+}
+
+/**
+ * 下单前查重：在未完成订单（未支付/待出票）中查找是否已含"同日期 + 同车次"的车票。
+ * 命中说明该日该车次已购得，无需再下单——直接标记当日计划完成即可。
+ *
+ * 查重失败时 fail-open（返回 null 继续走下单流程）：真有未支付订单时，
+ * 下单流程自身也会被服务端拦截（点预订后不跳转），不会重复成交。
+ */
+async function findExistingTicket(
+  context: BrowserContext,
+  trainDate: string,
+  trainCode: string,
+): Promise<{ orderNo: string } | null> {
+  const page = await context.newPage();
+  try {
+    // 先打开 kyfw 域查票页，确保 cookie 域名就绪且 fetch 为同源
+    await page.goto(URLS.LEFT_TICKET_INIT, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => undefined);
+    const body = await page.evaluate(async (u: string) => {
+      const res = await fetch(u, { credentials: 'include' });
+      return res.text();
+    }, URLS.MY_ORDER_NO_COMPLETE);
+    const data = JSON.parse(body) as {
+      data?: {
+        orderDBList?: Array<{
+          sequence_no?: string;
+          tickets?: Array<{ station_train_code?: string; start_train_date_page?: string }>;
+        }>;
+      };
+    };
+    // 日期/车次都做归一化后比较（12306 返回的日期可能带分隔符，车次可能含空格）
+    const wantDate = trainDate.replace(/\D/g, '');
+    const wantCode = trainCode.replace(/\s/g, '').toUpperCase();
+    for (const o of data.data?.orderDBList ?? []) {
+      for (const t of o.tickets ?? []) {
+        const d = String(t.start_train_date_page ?? '').replace(/\D/g, '');
+        const c = String(t.station_train_code ?? '').replace(/\s/g, '').toUpperCase();
+        if (d === wantDate && c === wantCode) {
+          return { orderNo: String(o.sequence_no ?? '') };
+        }
+      }
+    }
+    return null;
+  } catch (e) {
+    logger.warn('查重失败，继续走下单流程', e);
+    return null;
+  } finally {
+    await page.close().catch(() => undefined);
+  }
 }
 
 /**
@@ -212,6 +263,20 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
     const seat = pickSeat(train, params.seatPositions);
     if (!seat) {
       return { ok: false, trainCode: train.trainCode, passengers: names, error: `${train.trainCode} 目标席别已无余票` };
+    }
+
+    // 1.5) 查重：已购车票中若已含目标车次，跳过下单，当日计划标记完成即可
+    const dup = await findExistingTicket(context, params.trainDate, train.trainCode);
+    if (dup) {
+      logger.info('已存在同车次未完成订单，跳过下单', { train: train.trainCode, orderNo: dup.orderNo });
+      return {
+        ok: true,
+        duplicated: true,
+        trainCode: train.trainCode,
+        passengers: names,
+        orderNo: dup.orderNo,
+        seatInfo: '已购（未支付）',
+      };
     }
 
     // 2) UAM 预热：先访问确认页触发 uamtk + uamauthclient 单点登录链

@@ -39,6 +39,7 @@ export function applySchema(): void {
   db.exec(sql);
   dropLegacyPasswordColumn();
   relaxUsernameNotNull();
+  addPlanDatesStatusColumn();
   log('数据库 schema 已应用');
 }
 
@@ -83,6 +84,18 @@ function relaxUsernameNotNull(): void {
     ALTER TABLE railway_accounts_new RENAME TO railway_accounts;
   `);
   log('已将 railway_accounts.username 改为可空（扫码登录不记录用户名）');
+}
+
+/**
+ * 兼容迁移：plan_dates 增加 status 列（pending|done）。
+ * 用于标记某一天的车票已购得（含查重命中"已有同车次"的情况），避免重复下单。
+ */
+function addPlanDatesStatusColumn(): void {
+  const db = getDb();
+  const cols = db.prepare('PRAGMA table_info(plan_dates)').all() as Array<{ name: string }>;
+  if (cols.some((c) => c.name === 'status')) return;
+  db.exec("ALTER TABLE plan_dates ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'");
+  log('已为 plan_dates 增加 status 列（pending|done）');
 }
 
 /** 初始化内置管理员账号 */

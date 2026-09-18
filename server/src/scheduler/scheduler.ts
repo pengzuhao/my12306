@@ -124,6 +124,17 @@ async function runTask(task: Task): Promise<void> {
   runningLocks.add(task.id);
   const plan = PlansRepo.get(task.planId);
   try {
+    // 过期计划：乘车日期已过（车已开），再下单毫无意义，直接作废不执行
+    if (task.travelDate < today()) {
+      TasksRepo.update(task.id, {
+        status: 'cancelled',
+        error: '乘车日期已过，视为过期计划，未执行',
+        finishedAt: new Date().toISOString(),
+      });
+      wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
+      logger.info('任务已过期，跳过执行', { taskId: task.id, travelDate: task.travelDate });
+      return;
+    }
     TasksRepo.update(task.id, { status: 'running', startedAt: new Date().toISOString(), attempts: task.attempts + 1 });
     wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
 
@@ -157,17 +168,23 @@ async function runTask(task: Task): Promise<void> {
         trainNumber: result.trainCode,
         finishedAt: new Date().toISOString(),
       });
-      // 需求 5：成功不付款，飞书提醒用户付款
-      await notifyOrderSuccess({
-        userId: task.userId,
-        planName: plan.name,
-        trainNumber: result.trainCode,
-        travelDate: task.travelDate,
-        passengers: result.passengers,
-        seatInfo: result.seatInfo,
-        payDeadline: result.payDeadline,
-      });
-      logger.info('购票成功，已提醒用户付款', { taskId: task.id, orderNo: result.orderNo });
+      if (result.duplicated) {
+        // 查重命中（已购同车次）：标记当日计划完成即可，未实际下单，不触发付款提醒
+        PlanDatesRepo.markDone(plan.id, task.travelDate);
+        logger.info('已购同车次，标记当日计划完成', { taskId: task.id, train: result.trainCode, orderNo: result.orderNo });
+      } else {
+        // 需求 5：成功不付款，飞书提醒用户付款
+        await notifyOrderSuccess({
+          userId: task.userId,
+          planName: plan.name,
+          trainNumber: result.trainCode,
+          travelDate: task.travelDate,
+          passengers: result.passengers,
+          seatInfo: result.seatInfo,
+          payDeadline: result.payDeadline,
+        });
+        logger.info('购票成功，已提醒用户付款', { taskId: task.id, orderNo: result.orderNo });
+      }
     } else {
       // 失败退避重试
       const nextAttempt = task.attempts + 1;
