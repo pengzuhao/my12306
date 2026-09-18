@@ -1,0 +1,29 @@
+# 依赖
+node_modules/
+**/node_modules/
+
+# 构建产物
+dist/
+**/dist/
+*.tsbuildinfo
+
+# 运行时数据（含数据库、浏览器 profile、会话、密钥、测试用飞书凭据）
+server/data/
+data/
+
+# 编辑器/系统
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# Tauri
+admin/src-tauri/target/
+admin/src-tauri/gen/
+
+# 本地环境变量
+.env
+.env.*
+
+# WorkBuddy 工作区数据（记忆/任务，非产品代码）
+.workbuddy/

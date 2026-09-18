@@ -1,0 +1,63 @@
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  background: #f5f7fa;
+}
+
+.app-layout {
+  height: 100vh;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  background: #001529;
+  color: #fff;
+}
+
+.app-header .logo {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.app-aside {
+  background: #fff;
+  border-right: 1px solid #e6e8eb;
+}
+
+.app-main {
+  padding: 16px;
+  overflow: auto;
+}
+
+.page-card {
+  margin-bottom: 16px;
+}
+
+.captcha-box {
+  text-align: center;
+}
+
+.captcha-box img {
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  cursor: crosshair;
+  max-width: 100%;
+}
+
+.mono {
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.tag-postponed {
+  margin-left: 6px;
+}

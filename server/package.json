@@ -1,0 +1,37 @@
+{
+  "name": "@my12306/server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "12306 自动购票后端服务：多用户、计划推算、浏览器自动化、飞书通知",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json && node --input-type=module -e \"import{copyFileSync as c}from'node:fs';c('src/db/schema.sql','dist/db/schema.sql')\"",
+    "start": "node dist/index.js",
+    "migrate": "tsx src/db/migrate.ts",
+    "test:date-engine": "tsx src/plans/__test__/date-engine.test.ts",
+    "test:feishu": "tsx src/notify/__test__/feishu-sign.test.ts",
+    "test:feishu-send": "tsx src/notify/__test__/feishu-send.test.ts"
+  },
+  "dependencies": {
+    "@fastify/static": "^8.0.4",
+    "@fastify/websocket": "^11.0.2",
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.8.1",
+    "fastify": "^5.2.1",
+    "jsonwebtoken": "^9.0.2",
+    "nanoid": "^5.0.9",
+    "playwright": "^1.49.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.10.5",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "my12306",
+  "version": "1.0.0",
+  "private": true,
+  "description": "12306 自动购票软件（管理台 + 后端服务，全 TypeScript）",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev --workspace server",
+    "dev:web": "npm run dev --workspace web",
+    "build:server": "npm run build --workspace server",
+    "build:web": "npm run build --workspace web",
+    "start:server": "npm run start --workspace server",
+    "migrate": "npm run migrate --workspace server",
+    "test": "npm run test:date-engine --workspace server && npm run test:feishu --workspace server"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
