@@ -20,6 +20,7 @@ import type { BrowserContext, Page } from 'playwright';
 import { URLS, SEAT_NAMES } from './constants.js';
 import { Logger } from '../logger.js';
 import { queryTrains, seatCount } from './tickets.js';
+import { queryPurchasedTickets } from './reconcile.js';
 import type { Passenger, TrainInfo } from '../types.js';
 
 const logger = new Logger('bot');
@@ -98,8 +99,8 @@ function pickSeat(train: TrainInfo, positions?: string[] | null): { code: string
 }
 
 /**
- * 下单前查重：在未完成订单（未支付/待出票）中查找是否已含"同日期 + 同车次"的车票。
- * 命中说明该日该车次已购得，无需再下单——直接标记当日计划完成即可。
+ * 下单前查重：在"已购"集合（未完成订单 ∪ 已完成订单）中查找是否已含"同日期 + 同车次"。
+ * 命中说明该日该车次已购得（无论已支付还是未支付），无需再下单——直接标记当日计划完成。
  *
  * 查重失败时 fail-open（返回 null 继续走下单流程）：真有未支付订单时，
  * 下单流程自身也会被服务端拦截（点预订后不跳转），不会重复成交。
@@ -108,42 +109,13 @@ async function findExistingTicket(
   context: BrowserContext,
   trainDate: string,
   trainCode: string,
-): Promise<{ orderNo: string } | null> {
-  const page = await context.newPage();
-  try {
-    // 先打开 kyfw 域查票页，确保 cookie 域名就绪且 fetch 为同源
-    await page.goto(URLS.LEFT_TICKET_INIT, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => undefined);
-    const body = await page.evaluate(async (u: string) => {
-      const res = await fetch(u, { credentials: 'include' });
-      return res.text();
-    }, URLS.MY_ORDER_NO_COMPLETE);
-    const data = JSON.parse(body) as {
-      data?: {
-        orderDBList?: Array<{
-          sequence_no?: string;
-          tickets?: Array<{ station_train_code?: string; start_train_date_page?: string }>;
-        }>;
-      };
-    };
-    // 日期/车次都做归一化后比较（12306 返回的日期可能带分隔符，车次可能含空格）
-    const wantDate = trainDate.replace(/\D/g, '');
-    const wantCode = trainCode.replace(/\s/g, '').toUpperCase();
-    for (const o of data.data?.orderDBList ?? []) {
-      for (const t of o.tickets ?? []) {
-        const d = String(t.start_train_date_page ?? '').replace(/\D/g, '');
-        const c = String(t.station_train_code ?? '').replace(/\s/g, '').toUpperCase();
-        if (d === wantDate && c === wantCode) {
-          return { orderNo: String(o.sequence_no ?? '') };
-        }
-      }
-    }
-    return null;
-  } catch (e) {
-    logger.warn('查重失败，继续走下单流程', e);
-    return null;
-  } finally {
-    await page.close().catch(() => undefined);
-  }
+): Promise<{ orderNo: string; paid: boolean } | null> {
+  const purchased = await queryPurchasedTickets(context);
+  if (!purchased) return null;
+  const key = `${trainDate.replace(/\D/g, '')}|${trainCode.replace(/\s/g, '').toUpperCase()}`;
+  const hit = purchased.get(key);
+  if (!hit) return null;
+  return { orderNo: hit.orderNo, paid: hit.status === 'paid' };
 }
 
 /**
@@ -268,14 +240,14 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
     // 1.5) 查重：已购车票中若已含目标车次，跳过下单，当日计划标记完成即可
     const dup = await findExistingTicket(context, params.trainDate, train.trainCode);
     if (dup) {
-      logger.info('已存在同车次未完成订单，跳过下单', { train: train.trainCode, orderNo: dup.orderNo });
+      logger.info('已存在同车次已购车票，跳过下单', { train: train.trainCode, orderNo: dup.orderNo, paid: dup.paid });
       return {
         ok: true,
         duplicated: true,
         trainCode: train.trainCode,
         passengers: names,
         orderNo: dup.orderNo,
-        seatInfo: '已购（未支付）',
+        seatInfo: dup.paid ? '已购（已支付）' : '已购（未支付）',
       };
     }
 

@@ -18,6 +18,8 @@ const logger = new Logger('notify');
 export interface FeishuMessage {
   /** @ 指定接收人（飞书用户 open_id / 手机号 / 邮箱，可空=群里所有人） */
   at?: string | string[];
+  /** 加急：发送红色主题的交互式卡片，在群里更醒目（飞书自定义机器人支持 msg_type=interactive） */
+  urgent?: boolean;
 }
 
 function genSign(secret: string, timestamp: number): string {
@@ -44,17 +46,30 @@ export async function sendFeishu(
   if (!cfg.webhookUrl?.startsWith('http')) return { ok: false, error: 'webhook 地址无效' };
 
   const timestamp = Math.floor(Date.now() / 1000);
+  const at = options.at;
+  const atList = at ? (Array.isArray(at) ? at : [at]).filter((x) => x.startsWith('+') || /^\d/.test(x)) : [];
+
   const body: Record<string, unknown> = {
     timestamp: String(timestamp),
-    msg_type: 'text',
-    content: { text },
   };
   if (cfg.secret) body.sign = genSign(cfg.secret, timestamp);
 
-  const at = options.at;
-  if (at) {
-    const list = Array.isArray(at) ? at : [at];
-    body.at = { atMobiles: list.filter((x) => x.startsWith('+') || /^\d/.test(x)), atUserIds: [] };
+  if (options.urgent) {
+    // 加急：红色主题交互式卡片。lark_md 里用 <at mobile=...> 语法实现 @（飞书卡片专用语法）
+    const atMd = atList.length ? atList.map((m) => `<at mobile=${m.replace(/^\+/, '')}></at>`).join(' ') + '\n' : '';
+    body.msg_type = 'interactive';
+    body.card = {
+      config: { wide_screen_mode: true },
+      header: {
+        title: { tag: 'plain_text', content: '🎫 12306 购票提醒（加急）' },
+        template: 'red',
+      },
+      elements: [{ tag: 'div', text: { tag: 'lark_md', content: atMd + text } }],
+    };
+  } else {
+    body.msg_type = 'text';
+    body.content = { text };
+    if (atList.length) body.at = { atMobiles: atList, atUserIds: [] };
   }
 
   try {
@@ -98,7 +113,8 @@ export function notifyOrderSuccess(params: {
     payDeadline ? `请尽快登录 12306 完成支付，订单保留至 ${payDeadline}` : '请尽快登录 12306 完成支付',
     '—— 本系统不会自动支付，请人工确认订单',
   ].filter(Boolean);
-  return sendFeishu(userId, lines.join('\n'));
+  // 购票成功是关键消息，走加急（红色卡片）
+  return sendFeishu(userId, lines.join('\n'), { urgent: true });
 }
 
 /** 会话失活告警（需求 3：发现失活通知用户） */
@@ -106,6 +122,7 @@ export function notifySessionInvalid(userId: string, reason: string): Promise<{ 
   return sendFeishu(
     userId,
     ['⚠️ 12306 会话已失活', `原因：${reason}`, '请登录管理台重新完成验证码登录，否则将影响自动购票。'].join('\n'),
+    { urgent: true },
   );
 }
 
@@ -120,5 +137,6 @@ export function notifyTaskFailed(params: {
   return sendFeishu(
     userId,
     ['❌ 自动购票失败', `计划：${planName}`, `乘车日期：${travelDate}`, `失败原因：${error}`, '请登录管理台查看日志并重试。'].join('\n'),
+    { urgent: true },
   );
 }

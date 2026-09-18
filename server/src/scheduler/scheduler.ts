@@ -23,6 +23,7 @@ import { today, addDays } from '../calendar/holidays.js';
 import { getContext, getSessionState } from '../bot/session.js';
 import { purchaseTicket } from '../bot/order.js';
 import { querySaleTime } from '../bot/tickets.js';
+import { queryPurchasedTickets } from '../bot/reconcile.js';
 import { notifyOrderSuccess, notifyTaskFailed } from '../notify/feishu.js';
 import { DEFAULT_PRESALE_DAYS } from '../config.js';
 import type { Plan, Task } from '../types.js';
@@ -31,6 +32,10 @@ const logger = new Logger('scheduler');
 
 /** 单个任务的最大重试次数 */
 const MAX_ATTEMPTS = 3;
+
+/** 对账节流：同一用户至少间隔 N 分钟才全量查一次订单，避免每秒触发都打接口 */
+const RECONCILE_MIN_INTERVAL_MS = 10 * 60 * 1000;
+const lastReconcileAt = new Map<string, number>();
 
 /** 任务 → 互斥锁，避免同一任务并发执行 */
 const runningLocks = new Set<string>();
@@ -109,14 +114,80 @@ async function resolveSaleTimes(): Promise<void> {
   }
 }
 
-/** 到点触发：queried → running → success/failed */
+/** 到点触发：queried → running → success/failed（先对账再执行，起售窗口仍完整留给购票） */
 async function triggerDueTasks(): Promise<void> {
   const nowIso = new Date().toISOString();
   const due = TasksRepo.listDue(nowIso, 10);
+  // 只在"确有到点任务"时对账一次：没有待执行任务时跑全量对账纯属浪费
+  if (due.length) {
+    await reconcileBeforeSale().catch((e) => logger.warn('对账循环异常', e));
+  }
   for (const task of due) {
     if (runningLocks.has(task.id)) continue;
     void runTask(task);
   }
+}
+
+/**
+ * 起售前对账（需求：预购车票含已支付和未支付的；未支付最终没付要回滚为未完成）。
+ *
+ * 扫描所有 active 计划中 status='done' 且乘车日未过去的记录，查 12306 实际订单：
+ *  - 仍在未完成/已完成订单里 → 保持 done
+ *  - 两边都查不到（未支付订单已超时取消且未补票）→ 回滚 pending，并把关联的
+ *    success 任务重置为 queried，让触发器在起售时刻重新执行购票。
+ *
+ * 在 triggerDueTasks 之前、同一次触发循环里执行：到点任务先对账再执行，
+ * 起售时间窗仍完整留给购票（对账只对"已标记完成"的日期动手，没占额外窗口）。
+ */
+async function reconcileBeforeSale(): Promise<void> {
+  const todayStr = today();
+  const plans = PlansRepo.listActive();
+  for (const plan of plans) {
+    const acc = RailwayAccountRepo.get(plan.userId);
+    if (!acc || acc.status !== 'active') continue;
+    // 用户级节流：10 分钟内已对账过则跳过（真到起售那一刻若有任务，triggerDueTasks 会再触发一轮）
+    const last = lastReconcileAt.get(plan.userId) ?? 0;
+    if (Date.now() - last < RECONCILE_MIN_INTERVAL_MS) continue;
+    const dates = PlanDatesRepo.list(plan.id).filter((d) => d.status === 'done' && d.travelDate >= todayStr);
+    if (!dates.length) continue;
+    lastReconcileAt.set(plan.userId, Date.now());
+    let ctx;
+    try {
+      ctx = await getContext(plan.userId);
+    } catch (e) {
+      logger.warn('对账：浏览器上下文获取失败', { plan: plan.name, error: e });
+      continue;
+    }
+    const purchased = await queryPurchasedTickets(ctx);
+    if (!purchased) {
+      logger.warn('对账：订单查询全部失败，跳过本轮', { plan: plan.name });
+      continue;
+    }
+    for (const d of dates) {
+      const hit = findByDateAndAnyCode(purchased, d.travelDate);
+      if (hit) continue; // 票还在（未支付或已支付），保持 done
+      // 回滚：票没了（未支付已超时取消），标记未完成并重置任务等待重新执行
+      PlanDatesRepo.markPending(plan.id, d.travelDate);
+      const tasks = TasksRepo.findByPlanDate(plan.id, d.travelDate);
+      for (const t of tasks) {
+        if (t.status === 'success') {
+          // 保留 saleAt（起售时刻不变）；重置为 queried 后触发器会重新执行
+          TasksRepo.update(t.id, { status: 'queried', result: null, error: '对账回滚：未支付订单已失效，重新执行', finishedAt: null });
+          logger.info('对账回滚：重新等待执行', { taskId: t.id, plan: plan.name, travelDate: d.travelDate, saleAt: t.saleAt });
+        }
+      }
+      logger.info('对账回滚：当日车票已失效', { plan: plan.name, travelDate: d.travelDate });
+    }
+  }
+}
+
+/** 已购集合里是否存在该日期的任一车次（查重/对账用，车次未指定时按日期匹配） */
+function findByDateAndAnyCode(purchased: Map<string, { orderNo: string; status: string }>, travelDate: string): boolean {
+  const prefix = `${travelDate.replace(/\D/g, '')}|`;
+  for (const key of purchased.keys()) {
+    if (key.startsWith(prefix)) return true;
+  }
+  return false;
 }
 
 /** 执行单个购票任务（含退避重试） */

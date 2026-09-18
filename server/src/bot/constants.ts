@@ -27,6 +27,8 @@ export const URLS = {
   STATION_NAME_JS: 'https://kyfw.12306.cn/otn/resources/js/framework/station_name.js',
   /** 未完成订单（未支付/待出票），用于下单前查重 */
   MY_ORDER_NO_COMPLETE: 'https://kyfw.12306.cn/otn/queryOrder/queryMyOrderNoComplete',
+  /** 已完成订单（已支付/已出票），用于对账确认"真正买到" */
+  MY_ORDER_COMPLETE: 'https://kyfw.12306.cn/otn/queryOrder/queryMyOrder',
 } as const;
 
 export const SELECTORS = {

@@ -296,6 +296,10 @@ export const PlanDatesRepo = {
   markDone(planId: string, travelDate: string): void {
     getDb().prepare("UPDATE plan_dates SET status = 'done' WHERE plan_id = ? AND travel_date = ?").run(planId, travelDate);
   },
+  /** 回滚：未支付订单已失效，该日重新标记为未完成（对账时调用） */
+  markPending(planId: string, travelDate: string): void {
+    getDb().prepare("UPDATE plan_dates SET status = 'pending' WHERE plan_id = ? AND travel_date = ?").run(planId, travelDate);
+  },
 };
 
 export const TasksRepo = {
@@ -377,6 +381,13 @@ export const TasksRepo = {
     const rows = getDb()
       .prepare(`SELECT * FROM tasks WHERE status = 'pending' ORDER BY travel_date ASC, created_at ASC LIMIT ?`)
       .all(limit) as Record<string, unknown>[];
+    return rows.map(rowToTask);
+  },
+  /** 对账用：按计划+乘车日期找任务（任意状态），回滚时定位已成功的任务 */
+  findByPlanDate(planId: string, travelDate: string): Task[] {
+    const rows = getDb()
+      .prepare('SELECT * FROM tasks WHERE plan_id = ? AND travel_date = ? ORDER BY created_at DESC')
+      .all(planId, travelDate) as Record<string, unknown>[];
     return rows.map(rowToTask);
   },
 };
