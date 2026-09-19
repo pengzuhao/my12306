@@ -57,11 +57,12 @@ function inTimeRange(depart: string, from?: string | null, to?: string | null): 
   return depart >= from && depart <= to;
 }
 
-/** 按座位偏好计算席别优先级（A/F 靠窗 → 二等座 ZE；B 中间；C/D 过道） */
+/** 按座位偏好计算席别优先级（A/F 靠窗 → 二等座 ZE 优先；B 中间；C/D 过道）。
+ *  不含 SWZ（商务座）：用户明确要求严格按偏好席别匹配，绝不回退到商务座/无座。 */
 function preferSeatTypes(positions?: string[] | null): string[] {
-  if (!positions || !positions.length) return ['ZE', 'ZY', 'YW', 'RW', 'TZ', 'SWZ'];
+  if (!positions || !positions.length) return ['ZE', 'ZY', 'YW', 'RW', 'TZ'];
   const hasWindow = positions.some((p) => p === 'A' || p === 'F');
-  return hasWindow ? ['ZE', 'ZY', 'YW', 'RW', 'TZ', 'SWZ'] : ['ZY', 'ZE', 'YW', 'RW', 'TZ', 'SWZ'];
+  return hasWindow ? ['ZE', 'ZY', 'YW', 'RW', 'TZ'] : ['ZY', 'ZE', 'YW', 'RW', 'TZ'];
 }
 
 /** 从余票结果中挑选目标车次（所选席别必须真有余票，不能只看字段非空） */
@@ -71,6 +72,8 @@ export function pickTrain(trains: TrainInfo[], params: PurchaseParams): TrainInf
   // 该车次是否有任一目标席别真有余票（"有"/数字>0）
   const anySeat = (t: TrainInfo) =>
     Object.entries(t.seats).some(([name, v]) => v && v !== '无' && v !== '' && seatCount(v) > 0);
+  // 该车次的"偏好席别"是否真有余票（严格匹配，不含商务座/无座）
+  const hasPrefSeat = (t: TrainInfo) => pref.some((code) => seatCount(t.seats[SEAT_NAMES[code]]) > 0);
   // 选出"有余票席别"集合，供后续提交时使用
   const candidates = trains
     .filter((t) => t.departTime !== '--' && t.departTime !== '24:00')
@@ -78,10 +81,16 @@ export function pickTrain(trains: TrainInfo[], params: PurchaseParams): TrainInf
     .filter(anySeat)
     .sort((a, b) => a.departTime.localeCompare(b.departTime));
   if (wanted && wanted.length) {
-    return candidates.find((t) => wanted.includes(t.trainCode.toUpperCase())) ?? null;
+    // 优先选"偏好席别有余票"的目标车次；都没有则仍返回目标车次，
+    // 由 pickSeat 严格校验后失败并触发飞书告警（错误信息能精确到席别）
+    return (
+      candidates.find((t) => wanted.includes(t.trainCode.toUpperCase()) && hasPrefSeat(t)) ??
+      candidates.find((t) => wanted.includes(t.trainCode.toUpperCase())) ??
+      null
+    );
   }
-  // 按时间范围取最早一班
-  return candidates[0] ?? null;
+  // 自动匹配：优先选"偏好席别有余票"的最早一班；都没有再取最早一班（由 pickSeat 拦截并告警）
+  return candidates.find(hasPrefSeat) ?? candidates[0] ?? null;
 }
 
 /** 从车次中按席别优先级挑出真正有余票的席别 */

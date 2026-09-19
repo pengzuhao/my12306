@@ -69,6 +69,10 @@ async function save(): Promise<void> {
     ElMessage.warning('请至少选择一名乘车人');
     return;
   }
+  if (!editing.seatPositions || !editing.seatPositions.length) {
+    ElMessage.warning('请选择座位席别（必填，按偏好席别严格匹配购票）');
+    return;
+  }
   try {
     await planApi.save(editing);
     ElMessage.success('计划已保存');
@@ -194,8 +198,8 @@ onMounted(load);
             <el-option label="G1" value="G1" /><el-option label="G3" value="G3" /><el-option label="G5" value="G5" />
           </el-select>
         </el-form-item>
-        <el-form-item label="座位偏好">
-          <el-select v-model="editing.seatPositions" multiple placeholder="不指定=系统分配">
+        <el-form-item label="座位偏好" required>
+          <el-select v-model="editing.seatPositions" multiple placeholder="必选：A/F 靠窗、C/D 过道">
             <el-option v-for="s in seatOptions" :key="s" :label="s + '（' + ({ A: '靠窗', B: '中间', C: '过道', D: '过道', F: '靠窗' } as Record<string, string>)[s] + '）'" :value="s" />
           </el-select>
         </el-form-item>

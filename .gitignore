@@ -11,6 +11,9 @@ dist/
 server/data/
 data/
 
+# 一键启动脚本的运行目录（pid / 日志）
+.run/
+
 # 编辑器/系统
 .vscode/
 .idea/

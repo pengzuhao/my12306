@@ -18,7 +18,7 @@ const logger = new Logger('notify');
 export interface FeishuMessage {
   /** @ 指定接收人（飞书用户 open_id / 手机号 / 邮箱，可空=群里所有人） */
   at?: string | string[];
-  /** 加急：发送红色主题的交互式卡片，在群里更醒目（飞书自定义机器人支持 msg_type=interactive） */
+  /** 加急：发送红色主题交互式卡片并 @所有人，强制手机端弹窗通知（飞书自定义机器人不支持加急消息类型） */
   urgent?: boolean;
 }
 
@@ -55,7 +55,10 @@ export async function sendFeishu(
   if (cfg.secret) body.sign = genSign(cfg.secret, timestamp);
 
   if (options.urgent) {
-    // 加急：红色主题交互式卡片。lark_md 里用 <at mobile=...> 语法实现 @（飞书卡片专用语法）
+    // 加急：红色主题交互式卡片 + @所有人，确保手机端一定能收到弹窗通知。
+    // 飞书自定义群机器人不支持"加急"消息类型（仅支持 text/post/image/share_chat/interactive），
+    // 卡片 lark_md 内嵌 <at id=all></at> 是 webhook 强制手机弹通知的唯一手段（需群开启"@所有人"）。
+    const atAll = '<at id=all></at>\n';
     const atMd = atList.length ? atList.map((m) => `<at mobile=${m.replace(/^\+/, '')}></at>`).join(' ') + '\n' : '';
     body.msg_type = 'interactive';
     body.card = {
@@ -64,7 +67,7 @@ export async function sendFeishu(
         title: { tag: 'plain_text', content: '🎫 12306 购票提醒（加急）' },
         template: 'red',
       },
-      elements: [{ tag: 'div', text: { tag: 'lark_md', content: atMd + text } }],
+      elements: [{ tag: 'div', text: { tag: 'lark_md', content: atAll + atMd + text } }],
     };
   } else {
     body.msg_type = 'text';

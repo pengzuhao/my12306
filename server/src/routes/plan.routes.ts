@@ -33,7 +33,7 @@ const planSchema = z.object({
   timeFrom: z.string().nullable().optional(),
   timeTo: z.string().nullable().optional(),
   trainNumbers: z.array(z.string()).nullable().optional(),
-  seatPositions: z.array(z.enum(['A', 'B', 'C', 'D', 'F'])).nullable().optional(),
+  seatPositions: z.array(z.enum(['A', 'B', 'C', 'D', 'F'])).min(1, '请至少选择一个座位席别'),
   passengerIds: z.array(z.string()).min(1),
 });
 

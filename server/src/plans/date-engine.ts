@@ -3,7 +3,9 @@
  *
  * 支持两种模式：
  *  - single   ：指定具体乘车日期（原样使用，不顺延，但会标注是否为工作日）
- *  - recurring：按工作周期推算（如"每周一"），若推算日为法定节假日/调休休息日，
+ *  - recurring：按工作周期推算（如"每周一"）。调休补班日计入工作周：若本周内
+ *               目标周几之前存在调休补班日（自然周末被安排为工作日，如 9.20 周日补班），
+ *               则以该补班日为本周首个工作日，提前触发；若推算日为法定节假日/调休休息日，
  *               则自动顺延到下一个工作日，并在结果中标注 postponed。
  *
  * 输出"具体购票日期列表"，发生顺延的条目额外标注。
@@ -91,14 +93,33 @@ export async function computeDates(input: DateEngineInput, todayStr?: string): P
   let safety = 0;
   while (cursor <= end && safety < 400) {
     safety++;
-    const wd = weekdayOf(cursor);
-    const workday = isWorkday(cursor);
-    if (workday) {
-      entries.push({ travelDate: cursor, originalDate: cursor, weekday: wd, postponed: false, isWorkday: true });
+    // 调休补班日计入工作周：对齐到目标周几后，若本周内该日之前存在调休补班日
+    // （自然周末被安排为工作日，如 9.20 周日补班），则以最早的补班日为本周首个工作日。
+    // 这样"每周一"在补班周会提前到周日触发，而不是死等周一。
+    const weekStart = addDays(cursor, -(target % 7));
+    let trigger = cursor;
+    for (let d = weekStart; d < cursor; d = addDays(d, 1)) {
+      if (d >= input.validFrom && d >= today && isWorkday(d) && weekdayOf(d) >= 6) {
+        trigger = d;
+        break;
+      }
+    }
+    if (isWorkday(trigger)) {
+      entries.push({
+        travelDate: trigger,
+        originalDate: cursor,
+        weekday: weekdayOf(trigger),
+        postponed: false,
+        isWorkday: true,
+        note:
+          trigger < cursor
+            ? `调休补班：本周首个工作日为 ${trigger}（周${weekdayOf(trigger)}），提前触发`
+            : undefined,
+      });
     } else {
       // 非工作日（法定节假日或周末）→ 顺延到下一个工作日
-      const shifted = nextWorkday(addDays(cursor, 1));
-      const why = holidayName(cursor) ?? '周末';
+      const shifted = nextWorkday(addDays(trigger, 1));
+      const why = holidayName(trigger) ?? '周末';
       entries.push({
         travelDate: shifted,
         originalDate: cursor,

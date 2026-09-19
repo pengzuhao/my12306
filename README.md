@@ -83,7 +83,7 @@ npx playwright install chromium
 
 ```bash
 npm run dev:server          # 后端 http://127.0.0.1:7788
-npm run dev:web             # 前端 http://localhost:5173（代理 7788）
+npm run dev:web             # 前端 http://localhost:7789（代理 7788）
 ```
 
 ### 生产模式
