@@ -85,6 +85,18 @@ export const sessionApi = {
   syncPassengers: () => http.post('/session/sync-passengers').then((r) => r.data),
 };
 
+// ---- 节假日日历（供两个日历标记节假日/调休补班） ----
+export interface HolidayDay {
+  date: string;
+  isWorkday: boolean;
+  holiday: string | null;
+}
+
+export const calendarApi = {
+  holidays: (year: number, month: number) =>
+    http.get('/calendar/holidays', { params: { year, month } }).then((r) => r.data as HolidayDay[]),
+};
+
 // ---- 飞书 ----
 export const feishuApi = {
   get: () => http.get('/feishu').then((r) => r.data),

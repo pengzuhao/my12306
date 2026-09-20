@@ -21,7 +21,6 @@
  */
 import { addDays, ensureYears, holidayName, isHoliday, isWorkday, nextWorkday, weekdayOf } from '../calendar/holidays.js';
 import { DEFAULT_PRESALE_DAYS } from '../config.js';
-import type { Plan } from '../types.js';
 
 export interface DateEngineInput {
   dateMode: 'single' | 'recurring' | 'workweek';
@@ -128,17 +127,24 @@ export async function computeDates(input: DateEngineInput, todayStr?: string): P
       if (picked) {
         // 应用提前/延后偏移（负=提前，正=延后）
         const shifted = offset ? addDays(picked, offset) : picked;
+        // 常态目标日：周初=周一，周末=周五。实际取到的首个/最后一个工作日若与常态不同，
+        // 说明本周被节假日挤占（如国庆周），标记为顺延。
+        const naive = edge === 'start' ? weekMonday : addDays(weekMonday, 4);
+        const postponed = picked !== naive;
         if (shifted >= today && shifted >= input.validFrom && shifted <= end) {
           const wd = weekdayOf(shifted);
           const parts: string[] = [];
+          if (postponed) {
+            const hol = holidayName(naive);
+            parts.push(`节假日顺延：${naive}（${hol ?? '非工作日'}）→ ${shifted}`);
+          }
           if (wd >= 6 && isWorkday(shifted)) parts.push(`调休补班：本周${edge === 'start' ? '首个' : '最后一个'}工作日为 ${shifted}（周${WD_NAMES[wd - 1]}）`);
-          else if (holidayName(picked) && picked !== shifted) parts.push(`节假日顺延：推算日 ${picked}（${holidayName(picked)}）`);
           if (offset) parts.push(offset < 0 ? `提前 ${-offset} 天：${picked} → ${shifted}` : `延后 ${offset} 天：${picked} → ${shifted}`);
           entries.push({
             travelDate: shifted,
-            originalDate: picked,
+            originalDate: naive,
             weekday: wd,
-            postponed: false,
+            postponed,
             isWorkday: isWorkday(shifted),
             note: parts.join('；') || undefined,
           });
@@ -186,18 +192,18 @@ export async function computeDates(input: DateEngineInput, todayStr?: string): P
   return entries;
 }
 
-/** 针对计划对象做预览（额外给出预估起售日期） */
-export async function previewForPlan(plan: Plan, todayStr?: string): Promise<PreviewEntry[]> {
+/** 针对推算入参做预览（额外给出预估起售日期）；可直接传计划对象 */
+export async function previewForPlan(input: DateEngineInput, todayStr?: string): Promise<PreviewEntry[]> {
   const entries = await computeDates(
     {
-      dateMode: plan.dateMode,
-      travelDate: plan.travelDate,
-      weekday: plan.weekday,
-      weekEdge: plan.weekEdge,
-      weekInterval: plan.weekInterval,
-      offsetDays: plan.offsetDays,
-      validFrom: plan.validFrom,
-      validUntil: plan.validUntil,
+      dateMode: input.dateMode,
+      travelDate: input.travelDate,
+      weekday: input.weekday,
+      weekEdge: input.weekEdge,
+      weekInterval: input.weekInterval,
+      offsetDays: input.offsetDays,
+      validFrom: input.validFrom,
+      validUntil: input.validUntil,
     },
     todayStr,
   );

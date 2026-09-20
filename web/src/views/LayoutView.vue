@@ -2,13 +2,23 @@
 import { onMounted, ref, computed } from 'vue';
 import { useRouter, RouterView } from 'vue-router';
 import { useAuthStore } from '../store/auth';
-import { sessionApi, taskApi, WsClient } from '../api';
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { taskApi, WsClient } from '../api';
+import {
+  sessionState,
+  loadSessionState,
+  startLogin,
+  handleQrCode,
+  handleSessionUpdate,
+  qrVisible,
+  qrImage,
+  qrStatus,
+  cancelLogin,
+} from '../store/session';
+import { ElMessage, ElNotification } from 'element-plus';
 
 const router = useRouter();
 const auth = useAuthStore();
 
-const sessionState = ref<Record<string, unknown>>({ loggedIn: false });
 const taskCount = ref(0);
 const ws = ref<WsClient | null>(null);
 
@@ -16,37 +26,34 @@ const menuItems = computed(() => [
   { index: '/dashboard', title: '仪表盘' },
   { index: '/orders', title: '已购车票' },
   { index: '/plans', title: '购票计划' },
-  { index: '/session', title: '12306 会话' },
   { index: '/feishu', title: '飞书通知' },
   { index: '/tasks', title: '任务与日志' },
   ...(auth.user?.role === 'admin' ? [{ index: '/users', title: '用户管理' }] : []),
 ]);
 
 async function loadSession(): Promise<void> {
-  try {
-    sessionState.value = await sessionApi.state();
-    // 无活跃 12306 会话时，引导用户登录（本次浏览器会话只提示一次，点过"稍后"就不再打扰）
-    if (!sessionState.value.loggedIn && !sessionStorage.getItem('my12306_guide_dismissed')) {
-      void guideLogin12306();
-    }
-  } catch {
-    // 未绑定时忽略
+  await loadSessionState();
+  // 无活跃 12306 会话时，引导用户登录（本次浏览器会话只提示一次）
+  if (!sessionState.value.loggedIn && !sessionStorage.getItem('my12306_guide_dismissed')) {
+    guideLogin12306();
   }
 }
 
-/** 引导用户登录 12306（扫码登录，不保存密码） */
-async function guideLogin12306(): Promise<void> {
-  try {
-    await ElMessageBox.confirm(
-      '当前没有活跃的 12306 会话，自动购票需要先登录 12306。\n是否现在登录？（只需 12306 APP 扫码，全程不保存密码）',
-      '登录 12306',
-      { confirmButtonText: '去登录', cancelButtonText: '稍后', type: 'warning' },
-    );
-    router.push('/session');
-  } catch {
-    // 用户选择稍后：本次浏览器会话不再提示
-    sessionStorage.setItem('my12306_guide_dismissed', '1');
-  }
+/**
+ * 引导用户登录 12306：用右上角通知而不是模态弹窗——
+ * 模态遮罩会拦截整页点击，导致菜单和其他按钮看起来"没响应"。
+ * 通知不阻塞操作，点击它直接弹出扫码二维码。
+ */
+function guideLogin12306(): void {
+  sessionStorage.setItem('my12306_guide_dismissed', '1');
+  ElNotification({
+    title: '需要登录 12306',
+    message: '当前没有活跃的 12306 会话，自动购票需要先登录。点击本通知扫码登录（全程不保存密码）。',
+    type: 'warning',
+    duration: 8000,
+    position: 'top-right',
+    onClick: () => startLogin(),
+  });
 }
 
 async function loadTasks(): Promise<void> {
@@ -72,15 +79,8 @@ onMounted(async () => {
   await loadTasks();
   ws.value = new WsClient(auth.token);
   ws.value.connect({
-    onSession: (m) => {
-      sessionState.value = m as Record<string, unknown>;
-    },
-    onQrCode: () => {
-      // 后端推送登录二维码：跳到会话页，弹窗由 SessionView 的 WS 监听展示
-      if (router.currentRoute.value.path !== '/session') {
-        router.push('/session');
-      }
-    },
+    onSession: handleSessionUpdate,
+    onQrCode: handleQrCode,
     onTask: () => loadTasks(),
   });
   ElMessage?.success?.('已连接实时通道');
@@ -97,7 +97,7 @@ onMounted(async () => {
         </el-tag>
         <el-tag type="info" effect="dark">待办任务 {{ taskCount }}</el-tag>
         <span>{{ auth.user?.displayName }}</span>
-        <el-button type="text" style="color: #fff" @click="logout">退出</el-button>
+        <el-button link style="color: #fff" @click="logout">退出</el-button>
       </div>
     </el-header>
     <el-container>
@@ -113,5 +113,27 @@ onMounted(async () => {
       </el-main>
     </el-container>
   </el-container>
+
+  <!-- 扫码登录弹窗（后端通过 WS 推送二维码，任何页面都可弹出） -->
+  <el-dialog v-model="qrVisible" title="扫码登录 12306" width="420px" :close-on-click-modal="false">
+    <div style="text-align: center">
+      <div style="margin-bottom: 12px; color: #e6a23c; font-weight: 600">{{ qrStatus }}</div>
+      <img
+        v-if="qrImage"
+        :src="qrImage"
+        alt="12306 登录二维码"
+        style="width: 260px; height: 260px; border: 1px solid #ebeef5; border-radius: 8px"
+      />
+      <div v-else style="width: 260px; height: 260px; margin: 0 auto; line-height: 260px; color: #909399">
+        二维码生成中…
+      </div>
+      <div style="margin-top: 8px; color: #909399; font-size: 12px">
+        请打开 12306 APP → 首页右上角「+」→ 扫一扫，扫描二维码确认登录。
+      </div>
+    </div>
+    <template #footer>
+      <el-button @click="cancelLogin">取消登录</el-button>
+    </template>
+  </el-dialog>
 </template>
 

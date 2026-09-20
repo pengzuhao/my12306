@@ -5,7 +5,8 @@ import type { FastifyInstance, FastifyPluginCallback } from 'fastify';
 import { z } from 'zod';
 import { PassengersRepo, PlansRepo, PlanDatesRepo, TasksRepo } from '../db/repo.js';
 import { currentUser } from './auth.routes.js';
-import { computeDates, previewForPlan } from '../plans/date-engine.js';
+import { previewForPlan } from '../plans/date-engine.js';
+import { ensureYears, isWorkday, holidayName } from '../calendar/holidays.js';
 import { Logger } from '../logger.js';
 import { nanoid } from 'nanoid';
 
@@ -27,8 +28,6 @@ const planSchema = z.object({
   dateMode: z.enum(['single', 'recurring', 'workweek']),
   travelDate: z.string().nullable().optional(),
   weekday: z.number().int().min(1).max(7).nullable().optional(),
-  weekStart: z.number().int().min(1).max(7).nullable().optional(),
-  weekEnd: z.number().int().min(1).max(7).nullable().optional(),
   weekEdge: z.enum(['start', 'end']).nullable().optional(),
   weekInterval: z.number().int().min(1).max(4).default(1),
   offsetDays: z.number().int().min(-6).max(6).default(0),
@@ -81,15 +80,12 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
     const parsed = planSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: '参数错误', detail: parsed.error.flatten() });
     const body = parsed.data;
-    // 校验：single 必须有 travelDate；recurring 必须有 weekday；workweek 必须有 weekStart/weekEnd
+    // 校验：single 必须有 travelDate；recurring 必须有 weekday；workweek 必须选工作周开始/结束
     if (body.dateMode === 'single' && !body.travelDate) {
       return reply.code(400).send({ error: '单次模式必须指定具体乘车日期' });
     }
     if (body.dateMode === 'recurring' && !body.weekday) {
       return reply.code(400).send({ error: '周期模式必须指定周几' });
-    }
-    if (body.dateMode === 'workweek' && (!body.weekStart || !body.weekEnd)) {
-      return reply.code(400).send({ error: '工作周模式必须指定工作周开始与结束' });
     }
     if (body.dateMode === 'workweek' && !body.weekEdge) {
       return reply.code(400).send({ error: '工作周模式必须选择工作周开始或工作周结束' });
@@ -143,20 +139,18 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
     const parsed = planSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: '参数错误', detail: parsed.error.flatten() });
     const body = parsed.data;
-    const entries = await computeDates({
+    // 预估起售日期 = 乘车日期 - 预售期（精确起售时刻由起售查询接口确定）
+    const entries = await previewForPlan({
       dateMode: body.dateMode,
-      travelDate: body.travelDate,
-      weekday: body.weekday,
-      weekEdge: body.weekEdge,
+      travelDate: body.travelDate ?? null,
+      weekday: body.weekday ?? null,
+      weekEdge: body.weekEdge ?? null,
       weekInterval: body.weekInterval,
       offsetDays: body.offsetDays,
       validFrom: body.validFrom,
-      validUntil: body.validUntil,
+      validUntil: body.validUntil ?? null,
     });
-    return entries.map((e) => ({
-      ...e,
-      estimatedSaleDate: e.travelDate.slice(0, 10),
-    }));
+    return entries;
   });
 
   /** 已保存计划的推算日期 + 关联任务状态 */
@@ -182,6 +176,29 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
     if (!keyword) return [];
     const { searchStations } = await import('../bot/stations.js');
     return searchStations(keyword, 12);
+  });
+
+  /**
+   * 节假日日历：给定年月，返回该月每天的节假日信息（供前端日历标记）。
+   * 节假日数据可能跨年（如 10 月含国庆），自动加载相邻年份。
+   */
+  app.get('/api/calendar/holidays', async (request, reply) => {
+    const user = currentUser(request);
+    if (!user) return reply.code(401).send({ error: '未登录' });
+    const { year, month } = request.query as { year?: string; month?: string };
+    const y = Number(year);
+    const m = Number(month);
+    if (!Number.isInteger(y) || !Number.isInteger(m) || m < 1 || m > 12) {
+      return reply.code(400).send({ error: 'year/month 参数无效' });
+    }
+    await ensureYears([y - 1, y, y + 1]);
+    const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    const out: Array<{ date: string; isWorkday: boolean; holiday: string | null }> = [];
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dateStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      out.push({ date: dateStr, isWorkday: isWorkday(dateStr), holiday: holidayName(dateStr) });
+    }
+    return out;
   });
 
   done();

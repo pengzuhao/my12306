@@ -11,7 +11,8 @@ const routes: RouteRecordRaw[] = [
       { path: 'dashboard', name: 'dashboard', component: () => import('../views/DashboardView.vue') },
       { path: 'orders', name: 'orders', component: () => import('../views/OrdersView.vue') },
       { path: 'plans', name: 'plans', component: () => import('../views/PlansView.vue') },
-      { path: 'session', name: 'session', component: () => import('../views/SessionView.vue') },
+      // 「12306 会话」已融合进仪表盘，旧书签自动跳转过去
+      { path: 'session', redirect: '/dashboard' },
       { path: 'feishu', name: 'feishu', component: () => import('../views/FeishuView.vue') },
       { path: 'tasks', name: 'tasks', component: () => import('../views/TasksView.vue') },
       { path: 'users', name: 'users', component: () => import('../views/UsersView.vue') },
