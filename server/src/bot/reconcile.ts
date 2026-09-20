@@ -14,7 +14,7 @@
  * 保证宝贵的起售时间窗全部留给真正的购票动作。
  */
 import type { BrowserContext } from 'playwright';
-import { URLS } from './constants.js';
+import { fetchCompletedOrders, fetchIncompleteOrders, warmOrderPage, type RawOrder, type RawTicket } from './orderApi.js';
 import { Logger } from '../logger.js';
 
 const logger = new Logger('bot');
@@ -32,24 +32,6 @@ function normDate(d: string): string {
 }
 function normCode(c: string): string {
   return c.replace(/\s/g, '').toUpperCase();
-}
-
-interface RawTicket {
-  /** 乘车日期（上车日期），如 "2026-09-28 00:00:00" */
-  train_date?: string;
-  /** 页面展示用的上车日期+时间，如 "2026-09-28 06:52"（跨日车这里才是真正的乘车日） */
-  start_train_date_page?: string;
-  stationTrainDTO?: {
-    /** 车次号，如 "D5"（注意：在 stationTrainDTO 里，不在 ticket 顶层） */
-    station_train_code?: string;
-    trainDTO?: { start_date_str?: string };
-  };
-  /** 票面状态：待支付 / 已支付 / 已出票 等 */
-  ticket_status_name?: string;
-}
-interface RawOrder {
-  sequence_no?: string;
-  tickets?: RawTicket[];
 }
 
 /**
@@ -92,34 +74,26 @@ function collectFromOrders(
 export async function queryPurchasedTickets(context: BrowserContext): Promise<Map<string, PurchasedTicket> | null> {
   const page = await context.newPage();
   try {
-    // 与 purchaseTicket 一致：initDc networkidle 预热，UAM 链跑完后页面在 kyfw 域，可同源 fetch
-    await page.goto(URLS.CONFIRM_INIT_DC, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => undefined);
-    await page.waitForTimeout(1500);
+    // 先 initDc 预热 UAM 链，再停在订单查询页（已完成订单接口必须 POST 带完整表单字段，
+    // 否则 12306 CDN 返回空响应——这是之前"已完成订单永远查不到"的根因）
+    await warmOrderPage(page);
 
     const map = new Map<string, PurchasedTicket>();
     let anyOk = false;
 
-    // 1) 未完成订单（未支付/待出票）
+    // 1) 未完成订单（未支付/待出票）——POST，列表在 data.orderDBList
     try {
-      const raw = await page.evaluate(async (u: string) => {
-        const res = await fetch(u, { credentials: 'include' });
-        return res.text();
-      }, URLS.MY_ORDER_NO_COMPLETE);
-      const data = JSON.parse(raw) as { data?: { orderDBList?: RawOrder[] } };
-      collectFromOrders(data.data?.orderDBList ?? [], map, true);
+      const list = await fetchIncompleteOrders(page);
+      collectFromOrders(list, map, true);
       anyOk = true;
     } catch (e) {
       logger.warn('对账：未完成订单查询失败', e);
     }
 
-    // 2) 已完成订单（已支付/已出票）
+    // 2) 已完成订单（已支付/已出票）——POST 分页，列表在 data.OrderDTODataList
     try {
-      const raw = await page.evaluate(async (u: string) => {
-        const res = await fetch(u, { credentials: 'include' });
-        return res.text();
-      }, URLS.MY_ORDER_COMPLETE);
-      const data = JSON.parse(raw) as { data?: { orderDBList?: RawOrder[] } };
-      collectFromOrders(data.data?.orderDBList ?? [], map, false);
+      const list = await fetchCompletedOrders(page);
+      collectFromOrders(list, map, false);
       anyOk = true;
     } catch (e) {
       // 已完成接口失败时降级：仅用未完成订单（回滚逻辑仍可工作——未支付订单消失即回滚信号）

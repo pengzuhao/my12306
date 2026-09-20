@@ -42,6 +42,7 @@ export function applySchema(): void {
   addPlanDatesStatusColumn();
   migratePlansWeekEdgeColumn();
   addPlansOffsetDaysColumn();
+  addPlansAllowNoSeatColumn();
   log('数据库 schema 已应用');
 }
 
@@ -127,6 +128,20 @@ function addPlansOffsetDaysColumn(): void {
   if (cols.some((c) => c.name === 'offset_days')) return;
   db.exec("ALTER TABLE plans ADD COLUMN offset_days INTEGER NOT NULL DEFAULT 0");
   log('已为 plans 增加 offset_days 列（相对推算日的提前/延后天数）');
+}
+
+/**
+ * 兼容迁移：plans 增加 allow_no_seat 列。
+ * 用户要求"除非计划明确允许，否则不买无座票"——旧行政默认 0（不允许），
+ * 行为与之前的"回退到无座"不同，但这是用户明确的新规则，老计划若确实想接受
+ * 无座需要手动开启。
+ */
+function addPlansAllowNoSeatColumn(): void {
+  const db = getDb();
+  const cols = db.prepare('PRAGMA table_info(plans)').all() as Array<{ name: string }>;
+  if (cols.some((c) => c.name === 'allow_no_seat')) return;
+  db.exec("ALTER TABLE plans ADD COLUMN allow_no_seat INTEGER NOT NULL DEFAULT 0");
+  log('已为 plans 增加 allow_no_seat 列（是否允许购买无座票，默认不允许）');
 }
 
 /** 初始化内置管理员账号 */

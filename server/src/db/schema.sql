@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS plans (
   time_to        TEXT,                                    -- 出发时间范围止，如 09:00
   train_numbers  TEXT,                                    -- JSON 数组：具体车次（可空=按时间范围自动匹配）
   seat_positions TEXT,                                    -- JSON 数组：座位偏好 A/B/C/D/F（可空=不指定）
+  allow_no_seat  INTEGER NOT NULL DEFAULT 0,              -- 是否允许购买无座票（0=不允许，1=允许）
   passenger_ids  TEXT NOT NULL,                           -- JSON 数组：乘车人 ID
   created_at     TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at     TEXT NOT NULL DEFAULT (datetime('now')),

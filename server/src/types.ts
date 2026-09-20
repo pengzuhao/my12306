@@ -61,6 +61,12 @@ export interface Plan {
   trainNumbers: string[] | null;
   /** 座位偏好 A/B/C/D/F（可空 = 不指定） */
   seatPositions: string[] | null;
+  /**
+   * 是否允许购买无座票（默认 false）。
+   * 用户明确要求：除非计划里勾选了"允许无座"，否则不要买无座票——
+   * 无座票虽然能成单，但站几小时不符合预期，让它失败告警比悄悄买下更好。
+   */
+  allowNoSeat: boolean;
   passengerIds: string[];
   createdAt: string;
   updatedAt: string;

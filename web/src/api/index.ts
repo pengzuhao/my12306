@@ -60,6 +60,8 @@ export interface PlanForm {
   timeTo: string | null;
   trainNumbers: string[] | null;
   seatPositions: string[] | null;
+  /** 是否允许购买无座票（默认 false：不买站票，除非明确勾选） */
+  allowNoSeat: boolean;
   passengerIds: string[];
 }
 
@@ -94,6 +96,37 @@ export const feishuApi = {
 // ---- 任务与日志 ----
 export const taskApi = {
   list: () => http.get('/tasks').then((r) => r.data),
+};
+
+// ---- 已购车票（已支付 + 待支付） ----
+export interface OrderRow {
+  orderNo: string;
+  status: 'unpaid' | 'paid';
+  statusText: string;
+  /** 乘车日期+上车时间（北京时间 YYYY-MM-DD HH:mm） */
+  travelDateTime: string;
+  trainCode: string;
+  fromStation: string;
+  toStation: string;
+  passengers: string[];
+  seats: string[];
+  totalPrice: number | null;
+  /** 支付截止时间（北京时间字符串） */
+  payLimitTime: string | null;
+  /** 支付截止时间戳（毫秒），前端据此做「确定刷新节点」 */
+  payLimitTs: number | null;
+}
+
+export interface OrdersResponse {
+  orders: OrderRow[];
+  fetchedAt: number;
+  cached?: boolean;
+  stale?: boolean;
+  error?: string;
+}
+
+export const ordersApi = {
+  list: () => http.get('/orders').then((r) => r.data as OrdersResponse),
 };
 
 export const logApi = {

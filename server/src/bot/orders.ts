@@ -12,7 +12,14 @@
  *  - 支付截止时间在订单层 pay_limit_time（北京时间字符串，如 "2026-09-20 14:29"）
  */
 import type { BrowserContext } from 'playwright';
-import { URLS } from './constants.js';
+import {
+  fetchCompletedOrders,
+  fetchIncompleteOrders,
+  ticketYuan,
+  warmOrderPage,
+  type RawOrder,
+  type RawTicket,
+} from './orderApi.js';
 import { Logger } from '../logger.js';
 
 const logger = new Logger('bot');
@@ -39,30 +46,6 @@ export interface OrderRow {
   payLimitTime: string | null;
   /** 支付截止时间的毫秒时间戳（前端据此做「确定刷新节点」） */
   payLimitTs: number | null;
-}
-
-interface RawTicket {
-  train_date?: string;
-  start_train_date_page?: string;
-  passenger_name?: string;
-  seat_type_name?: string;
-  coach_name?: string;
-  seat_name?: string;
-  price?: number | string;
-  ticket_status_name?: string;
-  /** 少数情况下支付截止时间在票层而非订单层 */
-  pay_limit_time?: string;
-  stationTrainDTO?: {
-    station_train_code?: string;
-    from_station_name?: string;
-    to_station_name?: string;
-  };
-}
-interface RawOrder {
-  sequence_no?: string;
-  pay_limit_time?: string;
-  ticket_status_name?: string;
-  tickets?: RawTicket[];
 }
 
 /**
@@ -125,12 +108,12 @@ function ingestOrders(
     const t0 = tickets[0];
     const statusText = String(o.ticket_status_name ?? t0.ticket_status_name ?? (fromIncomplete ? '未完成' : '已完成'));
     const anyUnpaid = fromIncomplete && tickets.some((t) => String(t.ticket_status_name ?? '').includes('待支付'));
-    const payLimitTime = normDateTime(o.pay_limit_time) || normDateTime(tickets.find((t) => t.pay_limit_time)?.pay_limit_time) || null;
+    const payLimitTime = normPayLimit(o.pay_limit_time) ?? normPayLimit(tickets.find((t) => t.pay_limit_time)?.pay_limit_time);
 
     let total: number | null = null;
     for (const t of tickets) {
-      const p = Number(t.price);
-      if (!Number.isNaN(p)) total = (total ?? 0) + p;
+      const p = ticketYuan(t);
+      if (p != null) total = (total ?? 0) + p;
     }
 
     map.set(orderNo, {
@@ -141,7 +124,7 @@ function ingestOrders(
       trainCode: String(t0.stationTrainDTO?.station_train_code ?? '').trim(),
       fromStation: String(t0.stationTrainDTO?.from_station_name ?? '').trim(),
       toStation: String(t0.stationTrainDTO?.to_station_name ?? '').trim(),
-      passengers: tickets.map((t) => String(t.passenger_name ?? '').trim()).filter(Boolean),
+      passengers: tickets.map((t) => String(t.passenger_name ?? t.passengerDTO?.passenger_name ?? '').trim()).filter(Boolean),
       seats: tickets
         .map((t) => {
           const bits = [t.coach_name, t.seat_name].filter(Boolean).join('车');
@@ -153,6 +136,19 @@ function ingestOrders(
       payLimitTs: parseCnTimestamp(payLimitTime),
     });
   }
+}
+
+/**
+ * 归一化支付截止时间，并过滤 12306 的哨兵值。
+ * 已完成订单的票层 pay_limit_time 是 "2099-01-01 01:01:01"（表示无需支付），
+ * 直接展示会变成一个吓人的 2099 截止时间，要丢弃。
+ */
+function normPayLimit(s: string | null | undefined): string | null {
+  const v = normDateTime(s);
+  if (!v) return null;
+  if (/^(19|20)\d{2}-/.test(v) === false) return null;
+  if (/^2099-/.test(v)) return null;
+  return v;
 }
 
 /** AccumOrder → 对外 OrderRow（推导 status） */
@@ -182,37 +178,31 @@ function toRow(a: AccumOrder): OrderRow {
 export async function queryOrders(context: BrowserContext): Promise<OrderRow[]> {
   const page = await context.newPage();
   try {
-    // 与 purchaseTicket / reconcile 一致：initDc networkidle 预热 UAM 链，之后可同源 fetch
-    await page.goto(URLS.CONFIRM_INIT_DC, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => undefined);
-    await page.waitForTimeout(1500);
-
-    const fetchJson = async (url: string): Promise<{ data?: { orderDBList?: RawOrder[] } }> => {
-      const raw = await page.evaluate(async (u: string) => {
-        const res = await fetch(u, { credentials: 'include' });
-        return res.text();
-      }, url);
-      return JSON.parse(raw) as { data?: { orderDBList?: RawOrder[] } };
-    };
+    // 先 initDc 预热 UAM 链，再停在订单查询页（fetch 的 Referer 由页面 URL 决定，
+    // 且已完成订单接口必须 POST 带完整表单字段，否则 CDN 返回空响应）
+    await warmOrderPage(page);
 
     const map = new Map<string, AccumOrder>();
     let anyOk = false;
 
-    // 1) 已完成订单先入表（已支付/已出票）
+    // 1) 已完成订单先入表（已支付/已出票）——POST 分页查询，列表在 OrderDTODataList
     try {
-      const data = await fetchJson(URLS.MY_ORDER_COMPLETE);
-      ingestOrders(data.data?.orderDBList ?? [], map, false);
+      const list = await fetchCompletedOrders(page);
+      ingestOrders(list, map, false);
+      logger.info('已完成订单入表', { count: list.length });
       anyOk = true;
     } catch (e) {
-      logger.warn('已购票：已完成订单查询失败', e);
+      logger.warn('已购票：已完成订单查询失败', e instanceof Error ? e.message : String(e));
     }
 
-    // 2) 未完成订单覆盖入表（待支付/待出票）
+    // 2) 未完成订单覆盖入表（待支付/待出票）——POST，列表在 orderDBList
     try {
-      const data = await fetchJson(URLS.MY_ORDER_NO_COMPLETE);
-      ingestOrders(data.data?.orderDBList ?? [], map, true);
+      const list = await fetchIncompleteOrders(page);
+      ingestOrders(list, map, true);
+      logger.info('未完成订单入表', { count: list.length });
       anyOk = true;
     } catch (e) {
-      logger.warn('已购票：未完成订单查询失败', e);
+      logger.warn('已购票：未完成订单查询失败', e instanceof Error ? e.message : String(e));
     }
 
     if (!anyOk) throw new Error('12306 订单查询失败（未完成与已完成接口均无响应，可能登录已失效）');
@@ -229,5 +219,55 @@ export async function queryOrders(context: BrowserContext): Promise<OrderRow[]> 
     return rows;
   } finally {
     await page.close().catch(() => undefined);
+  }
+}
+
+/** 拦截型未支付订单（用户要求：有未支付订单时不下新单，等支付或失效） */
+export interface UnpaidBlock {
+  orderNo: string;
+  /** 人类可读描述：乘车日期时间 + 车次 */
+  describe: string;
+  /** 支付截止时间戳（未知时为 null） */
+  payLimitTs: number | null;
+}
+
+/**
+ * 检查账户是否存在"拦截型"未支付订单：12306 每个账户同时只允许一个未支付订单，
+ * 强行下新单会在点"预订"时被静默拦截。
+ *
+ * 不算拦截的情况：同日同车次的未支付订单——那是已购查重，交给 purchaseTicket
+ * 内部的 dedup 处理（没指定车次时，同日任意车次都算查重）。
+ * 注意同日不同车次的未支付订单仍会拦截：12306 限制的是"账户只能有一个未支付
+ * 订单"，与日期无关，那张废票一样占着唯一名额。
+ *
+ * 查询失败时 fail-open 返回 null（放行到购票流程，由 purchaseTicket 自身检测兜底），
+ * 与 checkOrders 的容错策略保持一致。
+ */
+export async function findBlockingUnpaid(
+  context: BrowserContext,
+  travelDate: string,
+  trainCode: string | null,
+): Promise<UnpaidBlock | null> {
+  try {
+    const rows = await queryOrders(context);
+    const day = travelDate.replace(/\D/g, '').slice(0, 8);
+    const code = trainCode ? trainCode.replace(/\s/g, '').toUpperCase() : null;
+    const block = rows.find((r) => {
+      if (r.status !== 'unpaid') return false;
+      const rDay = r.travelDateTime.replace(/\D/g, '').slice(0, 8);
+      const rCode = r.trainCode.replace(/\s/g, '').toUpperCase();
+      // 同日（且同车次，若指定了车次）视为已购查重，不拦截
+      if (rDay === day && (code === null || rCode === code)) return false;
+      return true;
+    });
+    if (!block) return null;
+    return {
+      orderNo: block.orderNo,
+      describe: `${block.travelDateTime} ${block.trainCode}`,
+      payLimitTs: block.payLimitTs,
+    };
+  } catch (e) {
+    logger.warn('未支付订单预检失败，放行到购票流程', e);
+    return null;
   }
 }

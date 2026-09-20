@@ -19,15 +19,19 @@ export const URLS = {
   LEFT_TICKET_QUERY: 'https://kyfw.12306.cn/otn/leftTicket/queryZ',
   QUERY_SALE_TIME: 'https://kyfw.12306.cn/otn/leftTicket/querySaleTime',
   CONFIRM_INIT_DC: 'https://kyfw.12306.cn/otn/confirmPassenger/initDc',
-  CHECK_ORDER_INFO: 'https://kyfw.12306.cn/otn/confirmPassenger/checkOrderInfo',
+  /** 「我的订单」查询页（已完成订单）。POST 查询时页面必须停在此 URL 上——
+   *  fetch 的 Referer 由页面 URL 决定，且请求体必须带完整表单字段，否则 12306
+   *  的 CDN 直接返回 content-length:0 的空响应（响应头 ct:"unknow"）*/
+  ORDER_INIT: 'https://kyfw.12306.cn/otn/queryOrder/init',  CHECK_ORDER_INFO: 'https://kyfw.12306.cn/otn/confirmPassenger/checkOrderInfo',
   GET_QUEUE_COUNT: 'https://kyfw.12306.cn/otn/confirmPassenger/getQueueCount',
   CONFIRM_SINGLE: 'https://kyfw.12306.cn/otn/confirmPassenger/confirmSingleForQueue',
   RESULT_ORDER: 'https://kyfw.12306.cn/otn/confirmPassenger/resultOrderForQueue',
   PASSENGERS: 'https://kyfw.12306.cn/otn/passengers/query',
   STATION_NAME_JS: 'https://kyfw.12306.cn/otn/resources/js/framework/station_name.js',
-  /** 未完成订单（未支付/待出票），用于下单前查重 */
+  /** 未完成订单（未支付/待出票），用于下单前查重。POST，body 固定 `_json_att=`；列表在 data.orderDBList */
   MY_ORDER_NO_COMPLETE: 'https://kyfw.12306.cn/otn/queryOrder/queryMyOrderNoComplete',
-  /** 已完成订单（已支付/已出票），用于对账确认"真正买到" */
+  /** 已完成订单（已支付/已出票），用于对账确认"真正买到"。必须 POST 且带完整表单字段；
+   *  列表在 data.OrderDTODataList（与未完成接口的 orderDBList 不同名） */
   MY_ORDER_COMPLETE: 'https://kyfw.12306.cn/otn/queryOrder/queryMyOrder',
 } as const;
 

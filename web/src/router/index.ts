@@ -9,6 +9,7 @@ const routes: RouteRecordRaw[] = [
     redirect: '/dashboard',
     children: [
       { path: 'dashboard', name: 'dashboard', component: () => import('../views/DashboardView.vue') },
+      { path: 'orders', name: 'orders', component: () => import('../views/OrdersView.vue') },
       { path: 'plans', name: 'plans', component: () => import('../views/PlansView.vue') },
       { path: 'session', name: 'session', component: () => import('../views/SessionView.vue') },
       { path: 'feishu', name: 'feishu', component: () => import('../views/FeishuView.vue') },

@@ -22,6 +22,7 @@ import { wsHub } from '../ws/hub.js';
 import { today, addDays } from '../calendar/holidays.js';
 import { getContext, getSessionState } from '../bot/session.js';
 import { purchaseTicket } from '../bot/order.js';
+import { findBlockingUnpaid } from '../bot/orders.js';
 import { querySaleTime } from '../bot/tickets.js';
 import { queryPurchasedTickets } from '../bot/reconcile.js';
 import { notifyOrderSuccess, notifyTaskFailed } from '../notify/feishu.js';
@@ -33,6 +34,17 @@ const logger = new Logger('scheduler');
 
 /** 单个任务的最大重试次数 */
 const MAX_ATTEMPTS = 3;
+
+/**
+ * 未支付订单拦截时的延后策略（用户要求：有未支付订单就不要继续下个时间点的购票，
+ * 直到用户支付或订单失效）。
+ *
+ * - 知道支付截止时间：等到截止后 1 分钟（给 12306 留出取消订单的缓冲）再重试
+ * - 不知道截止时间：15 分钟后兜底重试
+ * - 无论哪种，延后都不计重试次数、不发飞书告警——这不是失败，是"等待"
+ */
+const UNPAID_EXPIRY_BUFFER_MS = 60_000;
+const UNPAID_RETRY_FALLBACK_MS = 15 * 60 * 1000;
 
 /** 对账节流：同一用户至少间隔 N 分钟才全量查一次订单，避免每秒触发都打接口 */
 const RECONCILE_MIN_INTERVAL_MS = 10 * 60 * 1000;
@@ -235,6 +247,7 @@ async function purchaseTicketWithRetry(task: Task, plan: Plan, passengers: Passe
     timeFrom: plan.timeFrom,
     timeTo: plan.timeTo,
     seatPositions: plan.seatPositions,
+    allowNoSeat: plan.allowNoSeat,
     passengers,
   };
   const first = await purchaseTicket(ctx, params);
@@ -278,6 +291,27 @@ async function runTask(task: Task): Promise<void> {
 
     const passengers = PassengersRepo.list(task.userId).filter((p) => plan.passengerIds.includes(p.id));
     if (!passengers.length) throw new Error('未选择乘车人');
+
+    // 用户要求：存在未支付订单时，不要继续下个时间点的购票，直到支付或订单失效。
+    // 这不是失败——不计重试次数、不发飞书，只是把任务推到"订单失效后"再执行。
+    // 12306 一个账户同时只允许一个未支付订单，现在下单必然被拦截，跑了也白跑。
+    //
+    // 预检和购票同在用户锁内：两者共用同一浏览器上下文，不锁起来会和并发的
+    // 对账/其他任务互相踩踏（曾经导致"点击预订后未进入确认页"）。
+    const deferred = await withUserLock(task.userId, async () => {
+      const ctx = await getContext(task.userId);
+      const block = await findBlockingUnpaid(ctx, task.travelDate, task.trainNumber);
+      if (!block) return null;
+      const waitMs = block.payLimitTs
+        ? block.payLimitTs - Date.now() + UNPAID_EXPIRY_BUFFER_MS
+        : UNPAID_RETRY_FALLBACK_MS;
+      const retryAt = new Date(Date.now() + Math.max(waitMs, 60_000)).toISOString();
+      TasksRepo.update(task.id, { status: 'queried', saleAt: retryAt, error: `等待未支付订单 ${block.orderNo}（${block.describe}）处理后再试`, finishedAt: new Date().toISOString() });
+      wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
+      logger.info('存在未支付订单，延后购票', { taskId: task.id, blockingOrder: block.orderNo, describe: block.describe, retryAt });
+      return retryAt;
+    });
+    if (deferred) return;
 
     // 用户级串行：整个浏览器流程（查询/预热/点预订/提交）包在锁内，
     // 同一 12306 会话绝不允许两个任务并行操作同一浏览器上下文。

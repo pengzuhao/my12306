@@ -39,6 +39,7 @@ function emptyForm(): PlanForm {
     timeTo: '09:00',
     trainNumbers: null,
     seatPositions: ['A', 'F'],
+    allowNoSeat: false,
     passengerIds: [],
   };
 }
@@ -144,8 +145,11 @@ onMounted(load);
             <div class="mono">{{ row.trainNumbers ? row.trainNumbers.join(', ') : '自动匹配' }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="座位" width="90">
-          <template #default="{ row }">{{ row.seatPositions ? row.seatPositions.join('/') : '不指定' }}</template>
+        <el-table-column label="座位" width="110">
+          <template #default="{ row }">
+            <div>{{ row.seatPositions ? row.seatPositions.join('/') : '不指定' }}</div>
+            <el-tag v-if="row.allowNoSeat" size="small" type="warning" style="margin-top: 2px">允许无座</el-tag>
+          </template>
         </el-table-column>
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
@@ -241,6 +245,12 @@ onMounted(load);
           <el-select v-model="editing.seatPositions" multiple placeholder="必选：A/F 靠窗、C/D 过道">
             <el-option v-for="s in seatOptions" :key="s" :label="s + '（' + ({ A: '靠窗', B: '中间', C: '过道', D: '过道', F: '靠窗' } as Record<string, string>)[s] + '）'" :value="s" />
           </el-select>
+        </el-form-item>
+        <el-form-item label="允许无座">
+          <el-switch v-model="editing.allowNoSeat" />
+          <span style="margin-left: 10px; color: #909399; font-size: 12px">
+            默认关闭：目标席别售罄时宁可失败告警，也不买无座票。开启后接受无座。
+          </span>
         </el-form-item>
         <el-form-item label="乘车人">
           <el-select v-model="editing.passengerIds" multiple style="width: 100%">

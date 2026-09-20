@@ -14,6 +14,7 @@ const ws = ref<WsClient | null>(null);
 
 const menuItems = computed(() => [
   { index: '/dashboard', title: '仪表盘' },
+  { index: '/orders', title: '已购车票' },
   { index: '/plans', title: '购票计划' },
   { index: '/session', title: '12306 会话' },
   { index: '/feishu', title: '飞书通知' },

@@ -50,7 +50,7 @@ my12306/
 │   ├── src/
 │   │   ├── index.ts          # 服务入口（启动 DB / API / WS / 静态托管 / 调度器 / 保活）
 │   │   ├── config.ts         # 配置与环境变量
-│   │   ├── routes/           # REST API（auth / plan / session / misc）
+│   │   ├── routes/           # REST API（auth / plan / session / order / misc）
 │   │   ├── db/               # schema.sql + 仓储层
 │   │   ├── plans/            # 日期推算引擎（含节假日顺延）
 │   │   ├── calendar/         # 节假日数据源（holiday-cn，带缓存）
@@ -58,7 +58,7 @@ my12306/
 │   │   ├── scheduler/        # 调度器：计划扫描 / 起售查询 / 秒级触发
 │   │   ├── notify/           # 飞书通知（签名校验）
 │   │   ├── ws/               # WebSocket 推送
-│   │   └── util/crypto.ts    # AES-256-GCM（保留备用）
+│   │   └── utils/            # 通用工具（北京时间 cnTime 等）
 │   ├── data/                 # 运行期数据（gitignored）
 │   └── e2e-verify.mjs        # 视觉端到端验证脚本
 └── web/

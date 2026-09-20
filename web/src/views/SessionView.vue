@@ -121,7 +121,7 @@ onUnmounted(() => {
   <div>
     <el-card class="page-card">
       <template #header><b>12306 登录</b></template>
-      <el-form label-width="120px" style="max-width: 520px" @submit.prevent="startLogin">
+      <el-form style="max-width: 520px" @submit.prevent="startLogin">
         <el-form-item>
           <el-button type="primary" :loading="loading" @click="startLogin">扫码登录 12306</el-button>
         </el-form-item>

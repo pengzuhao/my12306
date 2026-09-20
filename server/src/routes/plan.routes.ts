@@ -38,6 +38,7 @@ const planSchema = z.object({
   timeTo: z.string().nullable().optional(),
   trainNumbers: z.array(z.string()).nullable().optional(),
   seatPositions: z.array(z.enum(['A', 'B', 'C', 'D', 'F'])).min(1, '请至少选择一个座位席别'),
+  allowNoSeat: z.boolean().default(false),
   passengerIds: z.array(z.string()).min(1),
 });
 
@@ -113,6 +114,7 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
       timeTo: body.timeTo ?? null,
       trainNumbers: body.trainNumbers ?? null,
       seatPositions: body.seatPositions ?? null,
+      allowNoSeat: body.allowNoSeat,
       passengerIds: body.passengerIds,
     });
     logger.info('保存计划', { planId: plan.id, name: plan.name, by: user.username });

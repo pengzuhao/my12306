@@ -33,6 +33,7 @@ function rowToPlan(row: Record<string, unknown>): Plan {
     timeTo: (row.time_to as string) ?? null,
     trainNumbers: row.train_numbers ? JSON.parse(row.train_numbers as string) : null,
     seatPositions: row.seat_positions ? JSON.parse(row.seat_positions as string) : null,
+    allowNoSeat: Boolean(row.allow_no_seat ?? 0),
     passengerIds: JSON.parse(row.passenger_ids as string),
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
@@ -229,9 +230,9 @@ export const PlansRepo = {
     const now = new Date().toISOString();
     const json = <T>(v: T[] | null): string | null => (v ? JSON.stringify(v) : null);
     db.prepare(
-      `INSERT INTO plans (id, user_id, name, status, from_station, to_station, date_mode, travel_date, weekday, week_edge, week_interval, offset_days, valid_from, valid_until, time_from, time_to, train_numbers, seat_positions, passenger_ids, created_at, updated_at)
-       VALUES (@id, @user_id, @name, @status, @from_station, @to_station, @date_mode, @travel_date, @weekday, @week_edge, @week_interval, @offset_days, @valid_from, @valid_until, @time_from, @time_to, @train_numbers, @seat_positions, @passenger_ids, @created_at, @updated_at)
-       ON CONFLICT(id) DO UPDATE SET name = excluded.name, status = excluded.status, from_station = excluded.from_station, to_station = excluded.to_station, date_mode = excluded.date_mode, travel_date = excluded.travel_date, weekday = excluded.weekday, week_edge = excluded.week_edge, week_interval = excluded.week_interval, offset_days = excluded.offset_days, valid_from = excluded.valid_from, valid_until = excluded.valid_until, time_from = excluded.time_from, time_to = excluded.time_to, train_numbers = excluded.train_numbers, seat_positions = excluded.seat_positions, passenger_ids = excluded.passenger_ids, updated_at = excluded.updated_at`,
+      `INSERT INTO plans (id, user_id, name, status, from_station, to_station, date_mode, travel_date, weekday, week_edge, week_interval, offset_days, valid_from, valid_until, time_from, time_to, train_numbers, seat_positions, allow_no_seat, passenger_ids, created_at, updated_at)
+       VALUES (@id, @user_id, @name, @status, @from_station, @to_station, @date_mode, @travel_date, @weekday, @week_edge, @week_interval, @offset_days, @valid_from, @valid_until, @time_from, @time_to, @train_numbers, @seat_positions, @allow_no_seat, @passenger_ids, @created_at, @updated_at)
+       ON CONFLICT(id) DO UPDATE SET name = excluded.name, status = excluded.status, from_station = excluded.from_station, to_station = excluded.to_station, date_mode = excluded.date_mode, travel_date = excluded.travel_date, weekday = excluded.weekday, week_edge = excluded.week_edge, week_interval = excluded.week_interval, offset_days = excluded.offset_days, valid_from = excluded.valid_from, valid_until = excluded.valid_until, time_from = excluded.time_from, time_to = excluded.time_to, train_numbers = excluded.train_numbers, seat_positions = excluded.seat_positions, allow_no_seat = excluded.allow_no_seat, passenger_ids = excluded.passenger_ids, updated_at = excluded.updated_at`,
     ).run({
       id: plan.id,
       user_id: plan.userId,
@@ -251,6 +252,7 @@ export const PlansRepo = {
       time_to: plan.timeTo,
       train_numbers: json(plan.trainNumbers),
       seat_positions: json(plan.seatPositions),
+      allow_no_seat: plan.allowNoSeat ? 1 : 0,
       passenger_ids: JSON.stringify(plan.passengerIds),
       created_at: now,
       updated_at: now,
