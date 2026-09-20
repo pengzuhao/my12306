@@ -34,6 +34,54 @@ function normCode(c: string): string {
   return c.replace(/\s/g, '').toUpperCase();
 }
 
+interface RawTicket {
+  /** 乘车日期（上车日期），如 "2026-09-28 00:00:00" */
+  train_date?: string;
+  /** 页面展示用的上车日期+时间，如 "2026-09-28 06:52"（跨日车这里才是真正的乘车日） */
+  start_train_date_page?: string;
+  stationTrainDTO?: {
+    /** 车次号，如 "D5"（注意：在 stationTrainDTO 里，不在 ticket 顶层） */
+    station_train_code?: string;
+    trainDTO?: { start_date_str?: string };
+  };
+  /** 票面状态：待支付 / 已支付 / 已出票 等 */
+  ticket_status_name?: string;
+}
+interface RawOrder {
+  sequence_no?: string;
+  tickets?: RawTicket[];
+}
+
+/**
+ * 从未完成/已完成订单里提取"已购"车票，写入 map。
+ *
+ * 字段坑（2026-09-20 实测订单 EQ61061412）：
+ *  - 车次号在 ticket.stationTrainDTO.station_train_code，不是 ticket.station_train_code
+ *    （后者不存在，导致解析出的车次恒为空，查重/拦截检测全部失效）
+ *  - 乘车日期用 ticket.train_date / start_train_date_page；
+ *    stationTrainDTO.trainDTO.start_date_str 是**始发站**日期，
+ *    跨日车（如 D5 从北京始发、南京 06:52 上车）会差一天，不能用
+ *  - 未完成订单里的票未必都是"待支付"：用 ticket_status_name 精确区分
+ */
+function collectFromOrders(
+  orders: RawOrder[],
+  map: Map<string, PurchasedTicket>,
+  fromIncomplete: boolean,
+): void {
+  for (const o of orders) {
+    const orderNo = String(o.sequence_no ?? '');
+    for (const t of o.tickets ?? []) {
+      // 乘车日期优先取页面展示值（带时间），退而取 train_date
+      const d = normDate(String(t.start_train_date_page ?? t.train_date ?? ''));
+      const c = normCode(String(t.stationTrainDTO?.station_train_code ?? ''));
+      if (!d || !c) continue;
+      const st = String(t.ticket_status_name ?? '');
+      const isUnpaid = fromIncomplete && st.includes('待支付');
+      map.set(`${d}|${c}`, { orderNo, status: isUnpaid ? 'unpaid' : 'paid' });
+    }
+  }
+}
+
 /**
  * 查询当前账户的全部"已购"车票（未完成 + 已完成）。
  * 返回值 key = `${date}|${trainCode}`（归一化），value = 状态。
@@ -57,16 +105,8 @@ export async function queryPurchasedTickets(context: BrowserContext): Promise<Ma
         const res = await fetch(u, { credentials: 'include' });
         return res.text();
       }, URLS.MY_ORDER_NO_COMPLETE);
-      const data = JSON.parse(raw) as {
-        data?: { orderDBList?: Array<{ sequence_no?: string; tickets?: Array<{ station_train_code?: string; start_train_date_page?: string }> }> };
-      };
-      for (const o of data.data?.orderDBList ?? []) {
-        for (const t of o.tickets ?? []) {
-          const d = normDate(String(t.start_train_date_page ?? ''));
-          const c = normCode(String(t.station_train_code ?? ''));
-          if (d && c) map.set(`${d}|${c}`, { orderNo: String(o.sequence_no ?? ''), status: 'unpaid' });
-        }
-      }
+      const data = JSON.parse(raw) as { data?: { orderDBList?: RawOrder[] } };
+      collectFromOrders(data.data?.orderDBList ?? [], map, true);
       anyOk = true;
     } catch (e) {
       logger.warn('对账：未完成订单查询失败', e);
@@ -78,17 +118,8 @@ export async function queryPurchasedTickets(context: BrowserContext): Promise<Ma
         const res = await fetch(u, { credentials: 'include' });
         return res.text();
       }, URLS.MY_ORDER_COMPLETE);
-      const data = JSON.parse(raw) as {
-        data?: { orderDBList?: Array<{ sequence_no?: string; tickets?: Array<{ station_train_code?: string; start_train_date_page?: string }> }> };
-      };
-      for (const o of data.data?.orderDBList ?? []) {
-        for (const t of o.tickets ?? []) {
-          const d = normDate(String(t.start_train_date_page ?? ''));
-          const c = normCode(String(t.station_train_code ?? ''));
-          // 已完成订单优先级高：同一车次已支付覆盖未支付
-          if (d && c) map.set(`${d}|${c}`, { orderNo: String(o.sequence_no ?? ''), status: 'paid' });
-        }
-      }
+      const data = JSON.parse(raw) as { data?: { orderDBList?: RawOrder[] } };
+      collectFromOrders(data.data?.orderDBList ?? [], map, false);
       anyOk = true;
     } catch (e) {
       // 已完成接口失败时降级：仅用未完成订单（回滚逻辑仍可工作——未支付订单消失即回滚信号）

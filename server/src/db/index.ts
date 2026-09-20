@@ -40,6 +40,8 @@ export function applySchema(): void {
   dropLegacyPasswordColumn();
   relaxUsernameNotNull();
   addPlanDatesStatusColumn();
+  migratePlansWeekEdgeColumn();
+  addPlansOffsetDaysColumn();
   log('数据库 schema 已应用');
 }
 
@@ -96,6 +98,35 @@ function addPlanDatesStatusColumn(): void {
   if (cols.some((c) => c.name === 'status')) return;
   db.exec("ALTER TABLE plan_dates ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'");
   log('已为 plan_dates 增加 status 列（pending|done）');
+}
+
+/**
+ * 兼容迁移：plans 的工作周模式改为 week_edge（start=工作周开始 / end=工作周结束）。
+ * 工作周不由用户选具体周几，而是按工作日历推算（常态周一至周五，节假日/调休自动顺延）。
+ */
+function migratePlansWeekEdgeColumn(): void {
+  const db = getDb();
+  const cols = db.prepare('PRAGMA table_info(plans)').all() as Array<{ name: string }>;
+  if (cols.some((c) => c.name === 'week_start') || cols.some((c) => c.name === 'week_end')) {
+    if (cols.some((c) => c.name === 'week_start')) db.exec('ALTER TABLE plans DROP COLUMN week_start');
+    if (cols.some((c) => c.name === 'week_end')) db.exec('ALTER TABLE plans DROP COLUMN week_end');
+    log('已移除 plans.week_start/week_end（工作周模式改为日历推算，不再选具体周几）');
+  }
+  if (!cols.some((c) => c.name === 'week_edge')) {
+    db.exec('ALTER TABLE plans ADD COLUMN week_edge TEXT');
+    log('已为 plans 增加 week_edge 列（start=工作周开始 | end=工作周结束）');
+  }
+}
+
+/**
+ * 兼容迁移：plans 增加 offset_days 列（相对工作周推算日的提前/延后天数，负=提前）。
+ */
+function addPlansOffsetDaysColumn(): void {
+  const db = getDb();
+  const cols = db.prepare('PRAGMA table_info(plans)').all() as Array<{ name: string }>;
+  if (cols.some((c) => c.name === 'offset_days')) return;
+  db.exec("ALTER TABLE plans ADD COLUMN offset_days INTEGER NOT NULL DEFAULT 0");
+  log('已为 plans 增加 offset_days 列（相对推算日的提前/延后天数）');
 }
 
 /** 初始化内置管理员账号 */

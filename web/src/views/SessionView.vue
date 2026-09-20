@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { sessionApi, WsClient } from '../api';
+import { fmtCn } from '../utils/time';
 
 const state = ref<Record<string, unknown>>({});
 const loading = ref(false);
@@ -138,8 +139,8 @@ onUnmounted(() => {
             {{ state.loggedIn ? '已登录' : '未登录' }}
           </el-tag>
         </el-descriptions-item>
-        <el-descriptions-item label="最后登录">{{ state.lastLoginAt ?? '-' }}</el-descriptions-item>
-        <el-descriptions-item label="最后检查">{{ state.lastCheckAt ?? '-' }}</el-descriptions-item>
+        <el-descriptions-item label="最后登录">{{ fmtCn(state.lastLoginAt as string) }}</el-descriptions-item>
+        <el-descriptions-item label="最后检查">{{ fmtCn(state.lastCheckAt as string) }}</el-descriptions-item>
         <el-descriptions-item v-if="state.failReason" label="失败原因" :span="2">
           <span style="color: #f56c6c">{{ state.failReason }}</span>
         </el-descriptions-item>

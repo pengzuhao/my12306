@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { taskApi, logApi } from '../api';
+import { fmtCn } from '../utils/time';
 
 const tasks = ref<Array<Record<string, unknown>>>([]);
 const logs = ref<Array<Record<string, unknown>>>([]);
@@ -43,7 +44,7 @@ onMounted(load);
         </el-table-column>
         <el-table-column label="起售时间" width="170">
           <template #default="{ row }">
-            <span class="mono">{{ row.saleAt ?? '-' }}</span>
+            <span class="mono">{{ fmtCn(row.saleAt as string) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="100">
@@ -68,7 +69,11 @@ onMounted(load);
     <el-card class="page-card">
       <template #header><b>系统日志</b>（实时）</template>
       <el-table :data="logs" border max-height="380">
-        <el-table-column label="时间" prop="created_at" width="170" />
+        <el-table-column label="时间" width="170">
+          <template #default="{ row }">
+            <span class="mono">{{ fmtCn(row.created_at as string) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="级别" prop="level" width="80">
           <template #default="{ row }">
             <el-tag :type="row.level === 'error' ? 'danger' : row.level === 'warn' ? 'warning' : 'info'" size="small">

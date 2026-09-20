@@ -24,10 +24,14 @@ const planSchema = z.object({
   name: z.string().min(1).max(64),
   fromStation: z.string().min(1),
   toStation: z.string().min(1),
-  dateMode: z.enum(['single', 'recurring']),
+  dateMode: z.enum(['single', 'recurring', 'workweek']),
   travelDate: z.string().nullable().optional(),
   weekday: z.number().int().min(1).max(7).nullable().optional(),
+  weekStart: z.number().int().min(1).max(7).nullable().optional(),
+  weekEnd: z.number().int().min(1).max(7).nullable().optional(),
+  weekEdge: z.enum(['start', 'end']).nullable().optional(),
   weekInterval: z.number().int().min(1).max(4).default(1),
+  offsetDays: z.number().int().min(-6).max(6).default(0),
   validFrom: z.string(),
   validUntil: z.string().nullable().optional(),
   timeFrom: z.string().nullable().optional(),
@@ -76,12 +80,18 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
     const parsed = planSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: '参数错误', detail: parsed.error.flatten() });
     const body = parsed.data;
-    // 校验：single 必须有 travelDate；recurring 必须有 weekday
+    // 校验：single 必须有 travelDate；recurring 必须有 weekday；workweek 必须有 weekStart/weekEnd
     if (body.dateMode === 'single' && !body.travelDate) {
       return reply.code(400).send({ error: '单次模式必须指定具体乘车日期' });
     }
     if (body.dateMode === 'recurring' && !body.weekday) {
       return reply.code(400).send({ error: '周期模式必须指定周几' });
+    }
+    if (body.dateMode === 'workweek' && (!body.weekStart || !body.weekEnd)) {
+      return reply.code(400).send({ error: '工作周模式必须指定工作周开始与结束' });
+    }
+    if (body.dateMode === 'workweek' && !body.weekEdge) {
+      return reply.code(400).send({ error: '工作周模式必须选择工作周开始或工作周结束' });
     }
     const id = (request.body as { id?: string })?.id ?? nanoid();
     const plan = PlansRepo.save({
@@ -94,7 +104,9 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
       dateMode: body.dateMode,
       travelDate: body.travelDate ?? null,
       weekday: body.weekday ?? null,
+      weekEdge: body.weekEdge ?? null,
       weekInterval: body.weekInterval,
+      offsetDays: body.offsetDays,
       validFrom: body.validFrom,
       validUntil: body.validUntil ?? null,
       timeFrom: body.timeFrom ?? null,
@@ -133,7 +145,9 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
       dateMode: body.dateMode,
       travelDate: body.travelDate,
       weekday: body.weekday,
+      weekEdge: body.weekEdge,
       weekInterval: body.weekInterval,
+      offsetDays: body.offsetDays,
       validFrom: body.validFrom,
       validUntil: body.validUntil,
     });

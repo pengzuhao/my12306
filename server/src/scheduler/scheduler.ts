@@ -26,7 +26,8 @@ import { querySaleTime } from '../bot/tickets.js';
 import { queryPurchasedTickets } from '../bot/reconcile.js';
 import { notifyOrderSuccess, notifyTaskFailed } from '../notify/feishu.js';
 import { DEFAULT_PRESALE_DAYS } from '../config.js';
-import type { Plan, Task } from '../types.js';
+import type { Passenger, Plan, Task } from '../types.js';
+import type { PurchaseResult } from '../bot/order.js';
 
 const logger = new Logger('scheduler');
 
@@ -40,6 +41,29 @@ const lastReconcileAt = new Map<string, number>();
 /** 任务 → 互斥锁，避免同一任务并发执行 */
 const runningLocks = new Set<string>();
 
+/**
+ * 用户级互斥锁：同一 12306 会话同一时刻只能跑一个浏览器流程（购票/对账）。
+ *
+ * 监控发现的关键问题：同一用户的多个任务并发执行时，它们共享同一个浏览器上下文
+ * （同一份 cookie/UAM 状态），两个流程几乎同时做 UAM 预热、同时点"预订"按钮，
+ * 互相踩踏导致"点击预订后未进入确认页"。任务级锁（runningLocks）管不到这件事，
+ * 必须按用户串行。
+ */
+const userLocks = new Map<string, Promise<unknown>>();
+
+function withUserLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = userLocks.get(userId) ?? Promise.resolve();
+  const next: Promise<unknown> = prev.then(
+    () => fn(),
+    () => fn(),
+  );
+  next.finally(() => {
+    if (userLocks.get(userId) === next) userLocks.delete(userId);
+  });
+  userLocks.set(userId, next);
+  return next as Promise<T>;
+}
+
 /** 计划扫描：生成未来任务 */
 async function scanPlans(): Promise<void> {
   const plans = PlansRepo.listActive();
@@ -49,7 +73,9 @@ async function scanPlans(): Promise<void> {
         dateMode: plan.dateMode,
         travelDate: plan.travelDate,
         weekday: plan.weekday,
+        weekEdge: plan.weekEdge,
         weekInterval: plan.weekInterval,
+        offsetDays: plan.offsetDays,
         validFrom: plan.validFrom,
         validUntil: plan.validUntil,
       });
@@ -151,43 +177,81 @@ async function reconcileBeforeSale(): Promise<void> {
     const dates = PlanDatesRepo.list(plan.id).filter((d) => d.status === 'done' && d.travelDate >= todayStr);
     if (!dates.length) continue;
     lastReconcileAt.set(plan.userId, Date.now());
-    let ctx;
-    try {
-      ctx = await getContext(plan.userId);
-    } catch (e) {
-      logger.warn('对账：浏览器上下文获取失败', { plan: plan.name, error: e });
-      continue;
-    }
-    const purchased = await queryPurchasedTickets(ctx);
-    if (!purchased) {
-      logger.warn('对账：订单查询全部失败，跳过本轮', { plan: plan.name });
-      continue;
-    }
-    for (const d of dates) {
-      const hit = findByDateAndAnyCode(purchased, d.travelDate);
-      if (hit) continue; // 票还在（未支付或已支付），保持 done
-      // 回滚：票没了（未支付已超时取消），标记未完成并重置任务等待重新执行
-      PlanDatesRepo.markPending(plan.id, d.travelDate);
-      const tasks = TasksRepo.findByPlanDate(plan.id, d.travelDate);
-      for (const t of tasks) {
-        if (t.status === 'success') {
-          // 保留 saleAt（起售时刻不变）；重置为 queried 后触发器会重新执行
-          TasksRepo.update(t.id, { status: 'queried', result: null, error: '对账回滚：未支付订单已失效，重新执行', finishedAt: null });
-          logger.info('对账回滚：重新等待执行', { taskId: t.id, plan: plan.name, travelDate: d.travelDate, saleAt: t.saleAt });
-        }
+    // 对账也走用户锁：不能和正在执行的购票流程共用同一会话，否则互相踩踏
+    await withUserLock(plan.userId, async () => {
+      let ctx;
+      try {
+        ctx = await getContext(plan.userId);
+      } catch (e) {
+        logger.warn('对账：浏览器上下文获取失败', { plan: plan.name, error: e });
+        return;
       }
-      logger.info('对账回滚：当日车票已失效', { plan: plan.name, travelDate: d.travelDate });
-    }
+      const purchased = await queryPurchasedTickets(ctx);
+      if (!purchased) {
+        logger.warn('对账：订单查询全部失败，跳过本轮', { plan: plan.name });
+        return;
+      }
+      for (const d of dates) {
+        const hit = findByDateAndAnyCode(purchased, d.travelDate);
+        if (hit) continue; // 票还在（未支付或已支付），保持 done
+        // 回滚：票没了（未支付已超时取消），标记未完成并重置任务等待重新执行
+        PlanDatesRepo.markPending(plan.id, d.travelDate);
+        const tasks = TasksRepo.findByPlanDate(plan.id, d.travelDate);
+        for (const t of tasks) {
+          if (t.status === 'success') {
+            // 保留 saleAt（起售时刻不变）；重置为 queried 后触发器会重新执行
+            TasksRepo.update(t.id, { status: 'queried', result: null, error: '对账回滚：未支付订单已失效，重新执行', finishedAt: null });
+            logger.info('对账回滚：重新等待执行', { taskId: t.id, plan: plan.name, travelDate: d.travelDate, saleAt: t.saleAt });
+          }
+        }
+        logger.info('对账回滚：当日车票已失效', { plan: plan.name, travelDate: d.travelDate });
+      }
+    });
   }
 }
 
 /** 已购集合里是否存在该日期的任一车次（查重/对账用，车次未指定时按日期匹配） */
 function findByDateAndAnyCode(purchased: Map<string, { orderNo: string; status: string }>, travelDate: string): boolean {
-  const prefix = `${travelDate.replace(/\D/g, '')}|`;
+  // key 的日期部分可能带时间（"202609280652|D5"），只取前 8 位日期做前缀
+  const prefix = `${travelDate.replace(/\D/g, '').slice(0, 8)}|`;
   for (const key of purchased.keys()) {
-    if (key.startsWith(prefix)) return true;
+    if (key.slice(0, prefix.length) === prefix) return true;
   }
   return false;
+}
+
+/**
+ * 锁内执行一次完整购票流程（查询 → 预热 → 点预订 → 确认页 → 提交）。
+ *
+ * 包一层即时重试：监控发现"点击预订后未进入确认页"这类瞬态失败很常见
+ * （UAM 预热未生效 / 页面跳转慢），在仍持锁的情况下立刻重跑一次，
+ * 比放开锁后走退避重试更可靠——避免重新排队时另一个任务插进来又踩踏。
+ */
+async function purchaseTicketWithRetry(task: Task, plan: Plan, passengers: Passenger[]): Promise<PurchaseResult> {
+  const ctx = await getContext(task.userId);
+  logger.info('触发购票（起售时刻）', { taskId: task.id, train: task.trainNumber, travelDate: task.travelDate });
+  const params = {
+    trainDate: task.travelDate,
+    fromStation: plan.fromStation,
+    toStation: plan.toStation,
+    trainNumbers: plan.trainNumbers,
+    timeFrom: plan.timeFrom,
+    timeTo: plan.timeTo,
+    seatPositions: plan.seatPositions,
+    passengers,
+  };
+  const first = await purchaseTicket(ctx, params);
+  if (first.ok || !isTransientFailure(first.error)) return first;
+  logger.warn('瞬态失败，持锁立即重试一次', { taskId: task.id, error: first.error });
+  return purchaseTicket(ctx, params);
+}
+
+/** 可即时重试的瞬态失败：页面跳转/UAM 类错误（其余错误交给调用方退避重试）。
+ *  注意"未完成订单/未支付订单被拦截"不算瞬态——重试前必须先由用户处理掉，立即重试纯属浪费。 */
+function isTransientFailure(error?: string | null): boolean {
+  if (!error) return false;
+  if (error.includes('未完成订单') || error.includes('未支付订单')) return false;
+  return error.includes('未进入确认页') || error.includes('UAM') || error.includes('超时');
 }
 
 /** 执行单个购票任务（含退避重试） */
@@ -218,19 +282,11 @@ async function runTask(task: Task): Promise<void> {
     const passengers = PassengersRepo.list(task.userId).filter((p) => plan.passengerIds.includes(p.id));
     if (!passengers.length) throw new Error('未选择乘车人');
 
-    const ctx = await getContext(task.userId);
-    logger.info('触发购票（起售时刻）', { taskId: task.id, train: task.trainNumber, travelDate: task.travelDate });
-
-    const result = await purchaseTicket(ctx, {
-      trainDate: task.travelDate,
-      fromStation: plan.fromStation,
-      toStation: plan.toStation,
-      trainNumbers: plan.trainNumbers,
-      timeFrom: plan.timeFrom,
-      timeTo: plan.timeTo,
-      seatPositions: plan.seatPositions,
-      passengers,
-    });
+    // 用户级串行：整个浏览器流程（查询/预热/点预订/提交）包在锁内，
+    // 同一 12306 会话绝不允许两个任务并行操作同一浏览器上下文。
+    const result = await withUserLock(task.userId, () =>
+      purchaseTicketWithRetry(task, plan, passengers),
+    );
 
     if (result.ok) {
       TasksRepo.update(task.id, {
@@ -239,9 +295,11 @@ async function runTask(task: Task): Promise<void> {
         trainNumber: result.trainCode,
         finishedAt: new Date().toISOString(),
       });
+      // 无论真实下单还是查重命中，都标记当日计划完成：
+      // 对账回滚只扫描 status='done' 的记录，漏标会导致"未支付订单超时取消后不自动重买"
+      PlanDatesRepo.markDone(plan.id, task.travelDate);
       if (result.duplicated) {
-        // 查重命中（已购同车次）：标记当日计划完成即可，未实际下单，不触发付款提醒
-        PlanDatesRepo.markDone(plan.id, task.travelDate);
+        // 查重命中（已购同车次）：未实际下单，不触发付款提醒
         logger.info('已购同车次，标记当日计划完成', { taskId: task.id, train: result.trainCode, orderNo: result.orderNo });
       } else {
         // 需求 5：成功不付款，飞书提醒用户付款

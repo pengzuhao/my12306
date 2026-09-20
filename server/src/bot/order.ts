@@ -108,23 +108,43 @@ function pickSeat(train: TrainInfo, positions?: string[] | null): { code: string
 }
 
 /**
- * 下单前查重：在"已购"集合（未完成订单 ∪ 已完成订单）中查找是否已含"同日期 + 同车次"。
- * 命中说明该日该车次已购得（无论已支付还是未支付），无需再下单——直接标记当日计划完成。
+ * 下单前查重 + 冲突检测：在"已购"集合（未完成订单 ∪ 已完成订单）中查找。
+ *
+ * 1) 同日期 + 同车次 → 已购得（无论已支付还是未支付），无需再下单，直接标记当日计划完成。
+ * 2) 存在**其他日期**的未支付订单 → 12306 每个账户同时只允许一个未支付订单，
+ *    此时点"预订"不会跳确认页（页面弹窗提示先支付/取消），必须等用户处理掉才能继续。
  *
  * 查重失败时 fail-open（返回 null 继续走下单流程）：真有未支付订单时，
  * 下单流程自身也会被服务端拦截（点预订后不跳转），不会重复成交。
  */
-async function findExistingTicket(
+interface OrderCheck {
+  /** 查重命中：已购同车次 */
+  duplicated?: { orderNo: string; paid: boolean };
+  /** 拦截型冲突：账户存在其他未支付订单，新车票买不了 */
+  blockingUnpaid?: { orderNo: string; date: string; trainCode: string };
+}
+
+async function checkOrders(
   context: BrowserContext,
   trainDate: string,
   trainCode: string,
-): Promise<{ orderNo: string; paid: boolean } | null> {
+): Promise<OrderCheck | null> {
   const purchased = await queryPurchasedTickets(context);
   if (!purchased) return null;
-  const key = `${trainDate.replace(/\D/g, '')}|${trainCode.replace(/\s/g, '').toUpperCase()}`;
-  const hit = purchased.get(key);
-  if (!hit) return null;
-  return { orderNo: hit.orderNo, paid: hit.status === 'paid' };
+  // key 的日期部分可能带时间（"202609280652|D5"），统一只取前 8 位日期比较
+  const day = trainDate.replace(/\D/g, '').slice(0, 8);
+  const code = trainCode.replace(/\s/g, '').toUpperCase();
+  const hit = [...purchased.entries()].find(([k]) => k.slice(0, 8) === day && k.split('|')[1] === code);
+  if (hit) return { duplicated: { orderNo: hit[1].orderNo, paid: hit[1].status === 'paid' } };
+  // 12306 只允许一个未支付订单：其他日期的未支付订单会拦死新订单
+  for (const [k, v] of purchased) {
+    if (v.status !== 'unpaid') continue;
+    const [d, c] = k.split('|');
+    if (d.slice(0, 8) !== day) {
+      return { blockingUnpaid: { orderNo: v.orderNo, date: d.slice(0, 8), trainCode: c } };
+    }
+  }
+  return null;
 }
 
 /**
@@ -246,9 +266,12 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
       return { ok: false, trainCode: train.trainCode, passengers: names, error: `${train.trainCode} 目标席别已无余票` };
     }
 
-    // 1.5) 查重：已购车票中若已含目标车次，跳过下单，当日计划标记完成即可
-    const dup = await findExistingTicket(context, params.trainDate, train.trainCode);
-    if (dup) {
+    // 1.5) 查重 + 未支付订单冲突检测
+    //   - 同日同车次已购 → 跳过下单，当日计划标记完成
+    //   - 存在其他日期的未支付订单 → 12306 拦截新订单，必须先处理掉
+    const orderCheck = await checkOrders(context, params.trainDate, train.trainCode);
+    if (orderCheck?.duplicated) {
+      const dup = orderCheck.duplicated;
       logger.info('已存在同车次已购车票，跳过下单', { train: train.trainCode, orderNo: dup.orderNo, paid: dup.paid });
       return {
         ok: true,
@@ -257,6 +280,16 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
         passengers: names,
         orderNo: dup.orderNo,
         seatInfo: dup.paid ? '已购（已支付）' : '已购（未支付）',
+      };
+    }
+    if (orderCheck?.blockingUnpaid) {
+      const b = orderCheck.blockingUnpaid;
+      logger.warn('账户存在未支付订单，新订单被 12306 拦截', { train: train.trainCode, blockingOrder: b.orderNo, blockingDate: b.date, blockingTrain: b.trainCode });
+      return {
+        ok: false,
+        trainCode: train.trainCode,
+        passengers: names,
+        error: `账户存在未支付订单 ${b.orderNo}（${b.date} ${b.trainCode}），12306 限制同一账户只能有一个未支付订单，请先支付或取消后再试`,
       };
     }
 
@@ -332,8 +365,24 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
     try {
       await page.waitForURL(/confirmPassenger\/initDc/, { waitUntil: 'domcontentloaded', timeout: 12000 });
     } catch {
+      // 抓页面可见文本（12306 拦截未支付订单时弹窗写的是"您有未完成的订单"之类）
+      const diag = await page
+        .evaluate(() => {
+          const w = globalThis as unknown as { document?: { body?: { textContent?: string } } };
+          return (w.document?.body?.textContent ?? '').replace(/\s+/g, ' ').slice(0, 400);
+        })
+        .catch(() => '');
       const s0 = await readConfirmState(page);
-      logger.warn('点击预订后未跳转到确认页', { train: train.trainCode, url: page.url().slice(0, 80), textLen: s0.textLen });
+      logger.warn('点击预订后未跳转到确认页', { train: train.trainCode, url: page.url().slice(0, 80), textLen: s0.textLen, diag: diag.slice(0, 200) });
+      // 未支付订单拦截：不是登录态问题，重试也没用，必须用户先处理
+      if (/未完成|未支付|先.*支付|取消订单/.test(diag)) {
+        return {
+          ok: false,
+          trainCode: train.trainCode,
+          passengers: names,
+          error: '点击预订后被 12306 拦截：账户存在未完成订单，请先支付或取消未支付订单',
+        };
+      }
       return {
         ok: false,
         trainCode: train.trainCode,

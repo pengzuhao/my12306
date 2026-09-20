@@ -16,6 +16,7 @@ import fastifyStatic from '@fastify/static';
 import fs from 'node:fs';
 import path from 'node:path';
 import { HOST, PORT } from './config.js';
+import { cnTime } from './calendar/holidays.js';
 import { applySchema, seedAdmin } from './db/index.js';
 import { setLogHub, Logger } from './logger.js';
 import { wsHub } from './ws/hub.js';
@@ -53,7 +54,7 @@ async function bootstrap(): Promise<void> {
       }
       (socket as unknown as { userId: string }).userId = userId;
       wsHub.add(socket);
-      socket.send(JSON.stringify({ type: 'status', payload: { connected: true, time: new Date().toISOString() } }));
+      socket.send(JSON.stringify({ type: 'status', payload: { connected: true, time: cnTime() } }));
       socket.on('message', (raw) => {
         try {
           const msg = JSON.parse(raw.toString()) as { type: string; payload: unknown };
@@ -74,8 +75,8 @@ async function bootstrap(): Promise<void> {
   await app.register(sessionRoutes);
   await app.register(miscRoutes);
 
-  // 健康检查
-  app.get('/api/health', async () => ({ ok: true, time: new Date().toISOString() }));
+  // 健康检查（东八区时间，用户要求所有时间都展示北京时间）
+  app.get('/api/health', async () => ({ ok: true, time: cnTime() }));
 
   // 生产环境托管前端
   const webDist = path.resolve(import.meta.dirname, '..', '..', 'web', 'dist');

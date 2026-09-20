@@ -30,7 +30,9 @@ function emptyForm(): PlanForm {
     dateMode: 'recurring',
     travelDate: null,
     weekday: 1,
+    weekEdge: 'start',
     weekInterval: 1,
+    offsetDays: 0,
     validFrom: new Date().toISOString().slice(0, 10),
     validUntil: null,
     timeFrom: '08:00',
@@ -119,10 +121,21 @@ onMounted(load);
         <el-table-column label="区间" min-width="120">
           <template #default="{ row }">{{ row.fromStation }} → {{ row.toStation }}</template>
         </el-table-column>
-        <el-table-column label="日期规则" min-width="180">
+        <el-table-column label="日期规则" min-width="200">
           <template #default="{ row }">
             <span v-if="row.dateMode === 'single'">单次 {{ row.travelDate }}</span>
-            <span v-else>每{{ row.weekInterval }}周的{{ weekdayNames[(row.weekday ?? 1) - 1] }}（{{ row.validFrom }} 起）</span>
+            <span v-else-if="row.dateMode === 'workweek'">
+              <el-tag size="small" type="success" effect="plain">日历推算</el-tag>
+              每{{ row.weekInterval }}周{{ row.weekEdge === 'end' ? '末（最后一个工作日）' : '初（首个工作日）' }}
+              <span v-if="row.offsetDays">（{{ row.offsetDays < 0 ? '提前' : '延后' }} {{ Math.abs(row.offsetDays) }} 天）</span>
+              <div style="color: #909399; font-size: 12px">按工作日历自动跳节假日、含调休补班（{{ row.validFrom }} 起）</div>
+            </span>
+            <span v-else>
+              <el-tag size="small" type="info" effect="plain">固定周几</el-tag>
+              每{{ row.weekInterval }}周的{{ weekdayNames[(row.weekday ?? 1) - 1] }}
+              <span v-if="row.offsetDays">（{{ row.offsetDays < 0 ? '提前' : '延后' }} {{ Math.abs(row.offsetDays) }} 天）</span>
+              <div style="color: #909399; font-size: 12px">不跳节假日，逢节假日照常（{{ row.validFrom }} 起）</div>
+            </span>
           </template>
         </el-table-column>
         <el-table-column label="时间/车次" min-width="160">
@@ -166,17 +179,43 @@ onMounted(load);
         <el-form-item label="日期模式">
           <el-radio-group v-model="editing.dateMode">
             <el-radio value="single">具体日期</el-radio>
-            <el-radio value="recurring">按工作周期</el-radio>
+            <el-radio value="recurring">固定周几（不跳节假日）</el-radio>
+            <el-radio value="workweek">工作周（日历推算，自动跳节假日）</el-radio>
           </el-radio-group>
         </el-form-item>
         <el-form-item v-if="editing.dateMode === 'single'" label="乘车日期">
           <el-date-picker v-model="editing.travelDate" type="date" value-format="YYYY-MM-DD" />
         </el-form-item>
+        <template v-else-if="editing.dateMode === 'workweek'">
+          <el-form-item label="工作周类型">
+            <el-radio-group v-model="editing.weekEdge">
+              <el-radio value="start">工作周开始（首个工作日）</el-radio>
+              <el-radio value="end">工作周结束（最后一个工作日）</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="提前/延后">
+            <el-input-number v-model="editing.offsetDays" :min="-6" :max="6" />
+            <span style="margin-left: 8px; color: #909399; font-size: 12px">天（负=提前，如 -1 提前一天；正=延后。0=按日历推算日）</span>
+          </el-form-item>
+          <el-form-item label="周期（周）">
+            <el-input-number v-model="editing.weekInterval" :min="1" :max="4" />
+          </el-form-item>
+          <el-form-item label="生效日期">
+            <el-date-picker v-model="editing.validFrom" type="date" value-format="YYYY-MM-DD" />
+          </el-form-item>
+          <el-form-item label="结束日期">
+            <el-date-picker v-model="editing.validUntil" type="date" value-format="YYYY-MM-DD" placeholder="留空=长期" />
+          </el-form-item>
+        </template>
         <template v-else>
           <el-form-item label="每周周几">
             <el-select v-model="editing.weekday" style="width: 120px">
               <el-option v-for="(n, i) in weekdayNames" :key="i" :label="n" :value="i + 1" />
             </el-select>
+          </el-form-item>
+          <el-form-item label="提前/延后">
+            <el-input-number v-model="editing.offsetDays" :min="-6" :max="6" />
+            <span style="margin-left: 8px; color: #909399; font-size: 12px">天（负=提前，正=延后，0=不偏移）</span>
           </el-form-item>
           <el-form-item label="周期（周）">
             <el-input-number v-model="editing.weekInterval" :min="1" :max="4" />
@@ -216,12 +255,12 @@ onMounted(load);
       </template>
     </el-dialog>
 
-    <el-dialog v-model="previewVisible" title="购票日期推算结果（节假日顺延已标注）" width="560px">
+    <el-dialog v-model="previewVisible" title="购票日期推算结果" width="560px">
       <el-table :data="previewRows" border max-height="400">
         <el-table-column label="乘车日期" prop="travelDate" width="130" />
         <el-table-column label="原始推算" prop="originalDate" width="130" />
         <el-table-column label="周几" width="70">
-          <template #default="{ row }">周{{ row.weekday }}</template>
+          <template #default="{ row }">{{ weekdayNames[(row.weekday ?? 1) - 1] }}</template>
         </el-table-column>
         <el-table-column label="说明" min-width="160">
           <template #default="{ row }">

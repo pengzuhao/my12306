@@ -1,6 +1,7 @@
 /** 轻量日志器：同时写入控制台、数据库 logs 表，并广播到 WebSocket 管理台。 */
 import { nanoid } from 'nanoid';
 import { getDb } from './db/index.js';
+import { cnTime } from './calendar/holidays.js';
 import type { WsHub } from './ws/hub.js';
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
@@ -15,7 +16,8 @@ export class Logger {
   constructor(private category: string, private userId?: string) {}
 
   private write(level: Level, message: string, detail?: unknown): void {
-    const time = new Date().toISOString();
+    // 统一用北京时间展示（用户要求所有时间都是东八区）
+    const time = cnTime();
     const detailStr = detail !== undefined ? JSON.stringify(detail) : null;
     // 控制台
     const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;

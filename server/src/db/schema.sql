@@ -61,10 +61,12 @@ CREATE TABLE IF NOT EXISTS plans (
   status         TEXT NOT NULL DEFAULT 'active',        -- active|paused|deleted
   from_station   TEXT NOT NULL,                          -- 出发站（城市/车站名）
   to_station     TEXT NOT NULL,                          -- 到达站
-  date_mode      TEXT NOT NULL,                          -- single | recurring
+  date_mode      TEXT NOT NULL,                          -- single | recurring | workweek
   travel_date    TEXT,                                    -- single 模式的具体乘车日期
   weekday        INTEGER,                                 -- recurring 模式：1-7（周一至周日）
+  week_edge      TEXT,                                    -- workweek 模式：start=工作周开始 | end=工作周结束
   week_interval  INTEGER NOT NULL DEFAULT 1,              -- 每隔几周
+  offset_days    INTEGER NOT NULL DEFAULT 0,              -- 相对推算日的偏移：负=提前（如 -1 提前一天），正=延后
   valid_from     TEXT NOT NULL,                           -- 生效起始日期
   valid_until    TEXT,                                    -- 生效结束日期（可空=长期）
   time_from      TEXT,                                    -- 出发时间范围起，如 08:00

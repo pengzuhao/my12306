@@ -48,10 +48,12 @@ export interface PlanForm {
   name: string;
   fromStation: string;
   toStation: string;
-  dateMode: 'single' | 'recurring';
+  dateMode: 'single' | 'recurring' | 'workweek';
   travelDate: string | null;
   weekday: number | null;
+  weekEdge: 'start' | 'end' | null;
   weekInterval: number;
+  offsetDays: number;
   validFrom: string;
   validUntil: string | null;
   timeFrom: string | null;

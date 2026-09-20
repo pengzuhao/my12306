@@ -41,13 +41,17 @@ export interface Plan {
   status: 'active' | 'paused' | 'deleted';
   fromStation: string;
   toStation: string;
-  dateMode: 'single' | 'recurring';
+  dateMode: 'single' | 'recurring' | 'workweek';
   /** single 模式的具体乘车日期 YYYY-MM-DD */
   travelDate: string | null;
   /** recurring 模式：1=周一 .. 7=周日 */
   weekday: number | null;
+  /** workweek 模式：start=工作周开始（首个工作日） / end=工作周结束（最后一个工作日），按工作日历推算 */
+  weekEdge: 'start' | 'end' | null;
   /** 每隔几周（默认 1） */
   weekInterval: number;
+  /** 相对推算日的偏移天数：负=提前（如 -1 提前一天，周日出发而非周一），正=延后 */
+  offsetDays: number;
   validFrom: string;
   validUntil: string | null;
   /** 出发时间范围，如 08:00 / 09:00 */
