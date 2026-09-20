@@ -1,7 +1,7 @@
 /** 轻量日志器：同时写入控制台、数据库 logs 表，并广播到 WebSocket 管理台。 */
 import { nanoid } from 'nanoid';
 import { getDb } from './db/index.js';
-import { cnTime } from './calendar/holidays.js';
+import { cnTime } from './utils/cn-time.js';
 import type { WsHub } from './ws/hub.js';
 
 type Level = 'debug' | 'info' | 'warn' | 'error';

@@ -1,0 +1,233 @@
+/**
+ * 已购车票明细查询（需求：管理台「已购车票」主页面，包含已支付和待支付的）。
+ *
+ * 数据来源 = 12306 未完成订单（待支付/待出票）∪ 已完成订单（已支付/已出票）。
+ * 与 reconcile.queryPurchasedTickets 的区别：后者只要「日期+车次」做对账查重，
+ * 本模块保留完整订单明细（乘车人、席别、票价、支付截止时间）供管理台展示。
+ *
+ * 字段坑（与 reconcile.ts 一致，2026-09-20 实测订单 EQ61061412 / EQ96017972）：
+ *  - 车次号在 ticket.stationTrainDTO.station_train_code
+ *  - 乘车日期用 start_train_date_page（含上车时间），train_date 是 00:00:00 形态
+ *  - 未完成订单里的票用 ticket_status_name 精确区分「待支付」
+ *  - 支付截止时间在订单层 pay_limit_time（北京时间字符串，如 "2026-09-20 14:29"）
+ */
+import type { BrowserContext } from 'playwright';
+import { URLS } from './constants.js';
+import { Logger } from '../logger.js';
+
+const logger = new Logger('bot');
+
+/** 一条订单（可能含多名乘车人，聚合成一行） */
+export interface OrderRow {
+  orderNo: string;
+  /** unpaid=待支付（未完成订单且票面为「待支付」）；paid=已支付/已出票 */
+  status: 'unpaid' | 'paid';
+  /** 12306 票面状态原文，如「待支付」/「已支付」/「已出票」 */
+  statusText: string;
+  /** 乘车日期+上车时间（北京时间，格式 YYYY-MM-DD HH:mm） */
+  travelDateTime: string;
+  trainCode: string;
+  fromStation: string;
+  toStation: string;
+  /** 乘车人姓名（多人） */
+  passengers: string[];
+  /** 席别+车厢座位（与 passengers 同长） */
+  seats: string[];
+  /** 总票价（元，所有票面价之和） */
+  totalPrice: number | null;
+  /** 未支付订单的支付截止时间（北京时间字符串） */
+  payLimitTime: string | null;
+  /** 支付截止时间的毫秒时间戳（前端据此做「确定刷新节点」） */
+  payLimitTs: number | null;
+}
+
+interface RawTicket {
+  train_date?: string;
+  start_train_date_page?: string;
+  passenger_name?: string;
+  seat_type_name?: string;
+  coach_name?: string;
+  seat_name?: string;
+  price?: number | string;
+  ticket_status_name?: string;
+  /** 少数情况下支付截止时间在票层而非订单层 */
+  pay_limit_time?: string;
+  stationTrainDTO?: {
+    station_train_code?: string;
+    from_station_name?: string;
+    to_station_name?: string;
+  };
+}
+interface RawOrder {
+  sequence_no?: string;
+  pay_limit_time?: string;
+  ticket_status_name?: string;
+  tickets?: RawTicket[];
+}
+
+/**
+ * 把 12306 的时间字符串归一化为「YYYY-MM-DD HH:mm」。
+ * start_train_date_page 形如 "2026-09-28 06:52"；train_date 形如 "2026-09-28 00:00:00"。
+ */
+function normDateTime(s: string | null | undefined): string {
+  if (!s) return '';
+  const m = /^(\d{4})\D(\d{1,2})\D(\d{1,2})(?:\D+(\d{1,2}):?(\d{2}))?/.exec(s);
+  if (!m) return s;
+  const [, y, mo, d, h, mi] = m;
+  const hh = (h ?? '').padStart(2, '0');
+  return h ? `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')} ${hh}:${(mi ?? '00').padStart(2, '0')}` : `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
+}
+
+/**
+ * 把北京时间的「YYYY-MM-DD HH:mm」解析为毫秒时间戳。
+ * 12306 下发的是无时区本地时间，统一按东八区(+08:00)解析。
+ */
+export function parseCnTimestamp(s: string | null | undefined): number | null {
+  if (!s) return null;
+  const m = /^(\d{4})\D(\d{1,2})\D(\d{1,2})(?:\D+(\d{1,2}):?(\d{2}))?/.exec(s);
+  if (!m) return null;
+  const [, y, mo, d, h = '0', mi = '0'] = m;
+  const iso = `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}T${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}:00+08:00`;
+  const ts = new Date(iso).getTime();
+  return Number.isNaN(ts) ? null : ts;
+}
+
+interface AccumOrder {
+  orderNo: string;
+  fromIncomplete: boolean;
+  statusText: string;
+  travelDateTime: string;
+  trainCode: string;
+  fromStation: string;
+  toStation: string;
+  passengers: string[];
+  seats: string[];
+  totalPrice: number | null;
+  payLimitTime: string | null;
+  payLimitTs: number | null;
+}
+
+/** 把 12306 原始订单列表汇入 map（key = orderNo） */
+function ingestOrders(
+  orders: RawOrder[],
+  map: Map<string, AccumOrder>,
+  fromIncomplete: boolean,
+): void {
+  for (const o of orders) {
+    const orderNo = String(o.sequence_no ?? '').trim();
+    if (!orderNo) continue;
+    const tickets = o.tickets ?? [];
+    if (!tickets.length) continue;
+    // 已完成订单先入表；未完成订单后入并覆盖——它是「未支付」状态的唯一真实来源
+    const existing = map.get(orderNo);
+    if (existing && !fromIncomplete) continue;
+
+    const t0 = tickets[0];
+    const statusText = String(o.ticket_status_name ?? t0.ticket_status_name ?? (fromIncomplete ? '未完成' : '已完成'));
+    const anyUnpaid = fromIncomplete && tickets.some((t) => String(t.ticket_status_name ?? '').includes('待支付'));
+    const payLimitTime = normDateTime(o.pay_limit_time) || normDateTime(tickets.find((t) => t.pay_limit_time)?.pay_limit_time) || null;
+
+    let total: number | null = null;
+    for (const t of tickets) {
+      const p = Number(t.price);
+      if (!Number.isNaN(p)) total = (total ?? 0) + p;
+    }
+
+    map.set(orderNo, {
+      orderNo,
+      fromIncomplete,
+      statusText,
+      travelDateTime: normDateTime(t0.start_train_date_page ?? t0.train_date),
+      trainCode: String(t0.stationTrainDTO?.station_train_code ?? '').trim(),
+      fromStation: String(t0.stationTrainDTO?.from_station_name ?? '').trim(),
+      toStation: String(t0.stationTrainDTO?.to_station_name ?? '').trim(),
+      passengers: tickets.map((t) => String(t.passenger_name ?? '').trim()).filter(Boolean),
+      seats: tickets
+        .map((t) => {
+          const bits = [t.coach_name, t.seat_name].filter(Boolean).join('车');
+          return [t.seat_type_name, bits].filter(Boolean).join(' ');
+        })
+        .filter(Boolean),
+      totalPrice: total,
+      payLimitTime,
+      payLimitTs: parseCnTimestamp(payLimitTime),
+    });
+  }
+}
+
+/** AccumOrder → 对外 OrderRow（推导 status） */
+function toRow(a: AccumOrder): OrderRow {
+  return {
+    orderNo: a.orderNo,
+    status: a.fromIncomplete && /待支付/.test(a.statusText) ? 'unpaid' : 'paid',
+    statusText: a.statusText,
+    travelDateTime: a.travelDateTime,
+    trainCode: a.trainCode,
+    fromStation: a.fromStation,
+    toStation: a.toStation,
+    passengers: a.passengers,
+    seats: a.seats,
+    totalPrice: a.totalPrice,
+    payLimitTime: a.payLimitTime,
+    payLimitTs: a.payLimitTs,
+  };
+}
+
+/**
+ * 查询当前账户的全部订单明细（未完成 + 已完成）。
+ *
+ * 排序：待支付在前（按支付截止时间升序，最紧急的在最上面），其余按乘车时间倒序。
+ * 两个接口任一失败都 fail-open（返回能拿到的部分）；都失败时抛错让调用方提示用户。
+ */
+export async function queryOrders(context: BrowserContext): Promise<OrderRow[]> {
+  const page = await context.newPage();
+  try {
+    // 与 purchaseTicket / reconcile 一致：initDc networkidle 预热 UAM 链，之后可同源 fetch
+    await page.goto(URLS.CONFIRM_INIT_DC, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => undefined);
+    await page.waitForTimeout(1500);
+
+    const fetchJson = async (url: string): Promise<{ data?: { orderDBList?: RawOrder[] } }> => {
+      const raw = await page.evaluate(async (u: string) => {
+        const res = await fetch(u, { credentials: 'include' });
+        return res.text();
+      }, url);
+      return JSON.parse(raw) as { data?: { orderDBList?: RawOrder[] } };
+    };
+
+    const map = new Map<string, AccumOrder>();
+    let anyOk = false;
+
+    // 1) 已完成订单先入表（已支付/已出票）
+    try {
+      const data = await fetchJson(URLS.MY_ORDER_COMPLETE);
+      ingestOrders(data.data?.orderDBList ?? [], map, false);
+      anyOk = true;
+    } catch (e) {
+      logger.warn('已购票：已完成订单查询失败', e);
+    }
+
+    // 2) 未完成订单覆盖入表（待支付/待出票）
+    try {
+      const data = await fetchJson(URLS.MY_ORDER_NO_COMPLETE);
+      ingestOrders(data.data?.orderDBList ?? [], map, true);
+      anyOk = true;
+    } catch (e) {
+      logger.warn('已购票：未完成订单查询失败', e);
+    }
+
+    if (!anyOk) throw new Error('12306 订单查询失败（未完成与已完成接口均无响应，可能登录已失效）');
+
+    const rows = [...map.values()].map(toRow);
+    rows.sort((a, b) => {
+      // 待支付置顶，按支付截止时间升序
+      if (a.status === 'unpaid' && b.status !== 'unpaid') return -1;
+      if (b.status === 'unpaid' && a.status !== 'unpaid') return 1;
+      if (a.status === 'unpaid' && b.status === 'unpaid') return (a.payLimitTs ?? Infinity) - (b.payLimitTs ?? Infinity);
+      // 其余按乘车时间倒序（最近的在前）
+      return b.travelDateTime.localeCompare(a.travelDateTime);
+    });
+    return rows;
+  } finally {
+    await page.close().catch(() => undefined);
+  }
+}

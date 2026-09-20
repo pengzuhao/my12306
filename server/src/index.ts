@@ -16,13 +16,14 @@ import fastifyStatic from '@fastify/static';
 import fs from 'node:fs';
 import path from 'node:path';
 import { HOST, PORT } from './config.js';
-import { cnTime } from './calendar/holidays.js';
+import { cnTime } from './utils/cn-time.js';
 import { applySchema, seedAdmin } from './db/index.js';
 import { setLogHub, Logger } from './logger.js';
 import { wsHub } from './ws/hub.js';
 import { authRoutes, currentUser } from './routes/auth.routes.js';
 import { planRoutes } from './routes/plan.routes.js';
 import { sessionRoutes } from './routes/session.routes.js';
+import { orderRoutes } from './routes/order.routes.js';
 import { miscRoutes } from './routes/misc.routes.js';
 import { startScheduler } from './scheduler/scheduler.js';
 import { startKeepalive, cancelQrLogin } from './bot/session.js';
@@ -73,6 +74,7 @@ async function bootstrap(): Promise<void> {
   await app.register(authRoutes);
   await app.register(planRoutes);
   await app.register(sessionRoutes);
+  await app.register(orderRoutes);
   await app.register(miscRoutes);
 
   // 健康检查（东八区时间，用户要求所有时间都展示北京时间）

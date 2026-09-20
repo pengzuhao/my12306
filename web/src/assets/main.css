@@ -38,6 +38,23 @@ body,
   overflow: auto;
 }
 
+/* 页面内容铺满主区域：内容比视口短时，最后一张卡片拉伸填满底部，避免出现大片空白。
+   用 :not(:has(~ .page-card)) 而不是 :last-child，因为弹窗（el-overlay）
+   即使隐藏也会留在 DOM 里，会抢走 last-child 的位置。 */
+.app-main > div,
+.app-main > section {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.app-main .page-card:not(:has(~ .page-card)) {
+  flex: 1;
+}
+/* 内容比视口高时不能被 flex 压缩，保持各自自然高度正常滚动 */
+.app-main .page-card {
+  flex-shrink: 0;
+}
+
 .page-card {
   margin-bottom: 16px;
 }
