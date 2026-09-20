@@ -84,11 +84,14 @@ export async function sendFeishu(
     });
     const data = (await res.json()) as { code?: number; msg?: string; StatusMessage?: string };
     // 飞书成功返回 { code: 0, msg: "success" }（旧版返回 { StatusMessage: "success" }）
-    const ok = data.code === 0 || data.StatusMessage === 'success' || res.ok;
+    // 注意：HTTP 200 不代表成功——签名错误等也返回 200 + code:19021，
+    // 不能用 res.ok 兜底，否则签名失败会被误判为"已发送"
+    const ok = data.code === 0 || data.StatusMessage === 'success';
     if (!ok) {
-      logger.warn('飞书消息发送失败', { status: res.status, data, user: userId });
-      return { ok: false, error: `飞书返回：${JSON.stringify(data)}` };
+      logger.warn('飞书消息发送失败', { status: res.status, code: data.code, msg: data.msg, user: userId });
+      return { ok: false, error: `飞书返回 code=${data.code}：${data.msg ?? '未知错误'}（请检查 webhook 地址与签名密钥是否匹配）` };
     }
+    logger.info('飞书消息已发送', { user: userId, urgent: Boolean(options.urgent) });
     return { ok: true };
   } catch (e) {
     logger.error('飞书消息发送异常', e);
@@ -137,9 +140,13 @@ export function notifyTaskFailed(params: {
   error: string;
 }): Promise<{ ok: boolean; error?: string }> {
   const { userId, planName, travelDate, error } = params;
-  return sendFeishu(
-    userId,
-    ['❌ 自动购票失败', `计划：${planName}`, `乘车日期：${travelDate}`, `失败原因：${error}`, '请登录管理台查看日志并重试。'].join('\n'),
-    { urgent: true },
-  );
+  // 未支付订单拦截：用户需要去 12306 处理，给可执行的指引而不是"看日志"
+  const blocked = error.includes('未支付订单') || error.includes('未完成订单');
+  const lines = ['❌ 自动购票失败', `计划：${planName}`, `乘车日期：${travelDate}`, `失败原因：${error}`];
+  if (blocked) {
+    lines.push('👉 请打开 12306 APP 完成支付（或取消订单），系统会在订单处理后自动重试购票');
+  } else {
+    lines.push('请登录管理台查看日志并重试。');
+  }
+  return sendFeishu(userId, lines.join('\n'), { urgent: true });
 }

@@ -144,10 +144,6 @@ async function resolveSaleTimes(): Promise<void> {
 async function triggerDueTasks(): Promise<void> {
   const nowIso = new Date().toISOString();
   const due = TasksRepo.listDue(nowIso, 10);
-  // 只在"确有到点任务"时对账一次：没有待执行任务时跑全量对账纯属浪费
-  if (due.length) {
-    await reconcileBeforeSale().catch((e) => logger.warn('对账循环异常', e));
-  }
   for (const task of due) {
     if (runningLocks.has(task.id)) continue;
     void runTask(task);
@@ -155,15 +151,16 @@ async function triggerDueTasks(): Promise<void> {
 }
 
 /**
- * 起售前对账（需求：预购车票含已支付和未支付的；未支付最终没付要回滚为未完成）。
+ * 订单对账（需求：预购车票含已支付和未支付的；未支付最终没付要回滚为未完成）。
  *
  * 扫描所有 active 计划中 status='done' 且乘车日未过去的记录，查 12306 实际订单：
  *  - 仍在未完成/已完成订单里 → 保持 done
  *  - 两边都查不到（未支付订单已超时取消且未补票）→ 回滚 pending，并把关联的
  *    success 任务重置为 queried，让触发器在起售时刻重新执行购票。
  *
- * 在 triggerDueTasks 之前、同一次触发循环里执行：到点任务先对账再执行，
- * 起售时间窗仍完整留给购票（对账只对"已标记完成"的日期动手，没占额外窗口）。
+ * 独立定时运行（每 10 分钟），不依赖"是否有到点任务"——否则任务全部成功后
+ * 对账就再也不跑，未支付订单过期无人重买（2026-09-20 的实际故障）。
+ * 起售时刻若有到点任务，下一轮对账在分钟级内自然执行，不占用宝贵的起售窗口。
  */
 async function reconcileBeforeSale(): Promise<void> {
   const todayStr = today();
@@ -303,7 +300,7 @@ async function runTask(task: Task): Promise<void> {
         logger.info('已购同车次，标记当日计划完成', { taskId: task.id, train: result.trainCode, orderNo: result.orderNo });
       } else {
         // 需求 5：成功不付款，飞书提醒用户付款
-        await notifyOrderSuccess({
+        const notify = await notifyOrderSuccess({
           userId: task.userId,
           planName: plan.name,
           trainNumber: result.trainCode,
@@ -312,18 +309,29 @@ async function runTask(task: Task): Promise<void> {
           seatInfo: result.seatInfo,
           payDeadline: result.payDeadline,
         });
-        logger.info('购票成功，已提醒用户付款', { taskId: task.id, orderNo: result.orderNo });
+        if (notify.ok) {
+          logger.info('购票成功，已提醒用户付款', { taskId: task.id, orderNo: result.orderNo });
+        } else {
+          // 通知失败必须留痕：用户收不到提醒就不知道要付款，订单会超时取消
+          logger.error('购票成功但飞书通知失败', { taskId: task.id, orderNo: result.orderNo, error: notify.error });
+        }
       }
     } else {
       // 失败退避重试
       const nextAttempt = task.attempts + 1;
       if (nextAttempt < MAX_ATTEMPTS) {
-        const retryAt = new Date(Date.now() + 20 * 1000 * 2 ** (nextAttempt - 1)).toISOString();
-        TasksRepo.update(task.id, { status: 'queried', saleAt: retryAt, error: result.error, finishedAt: new Date().toISOString() });
-        logger.warn('购票失败，安排重试', { taskId: task.id, error: result.error, retryAt });
+        // "存在未支付订单"必须用户先处理，快速重试毫无意义：
+        // 未支付订单约 30 分钟才自动取消，重试间隔至少拉到 15 分钟，且不重复发告警
+        const errMsg = result.error ?? '未知错误';
+        const blocked = errMsg.includes('未支付订单') || errMsg.includes('未完成订单');
+        const baseMs = blocked ? 15 * 60 * 1000 : 20 * 1000 * 2 ** (nextAttempt - 1);
+        const retryAt = new Date(Date.now() + baseMs).toISOString();
+        TasksRepo.update(task.id, { status: 'queried', saleAt: retryAt, error: errMsg, finishedAt: new Date().toISOString() });
+        logger.warn('购票失败，安排重试', { taskId: task.id, error: errMsg, retryAt, blocked });
       } else {
         TasksRepo.update(task.id, { status: 'failed', error: result.error, finishedAt: new Date().toISOString() });
-        await notifyTaskFailed({ userId: task.userId, planName: plan.name, travelDate: task.travelDate, error: result.error ?? '未知错误' });
+        const notify = await notifyTaskFailed({ userId: task.userId, planName: plan.name, travelDate: task.travelDate, error: result.error ?? '未知错误' });
+        if (!notify.ok) logger.error('失败告警也发送失败', { taskId: task.id, error: notify.error });
       }
     }
     wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
@@ -343,6 +351,7 @@ async function runTask(task: Task): Promise<void> {
 let scanTimer: NodeJS.Timeout | null = null;
 let saleTimer: NodeJS.Timeout | null = null;
 let triggerTimer: NodeJS.Timeout | null = null;
+let reconcileTimer: NodeJS.Timeout | null = null;
 
 export function startScheduler(): void {
   if (scanTimer) return;
@@ -352,12 +361,14 @@ export function startScheduler(): void {
   saleTimer = setInterval(() => void resolveSaleTimes(), 60 * 1000);
   // 秒级触发：确保在起售时刻第一时间购票
   triggerTimer = setInterval(() => void triggerDueTasks(), 1000);
-  logger.info('调度器已启动（计划扫描 5 分钟 / 起售查询 1 分钟 / 触发器 1 秒）');
+  // 独立对账：未支付订单过期后自动回滚并重新下单，不依赖是否有到点任务
+  reconcileTimer = setInterval(() => void reconcileBeforeSale().catch((e) => logger.warn('对账循环异常', e)), RECONCILE_MIN_INTERVAL_MS);
+  logger.info('调度器已启动（计划扫描 5 分钟 / 起售查询 1 分钟 / 触发器 1 秒 / 对账 10 分钟）');
 }
 
 export function stopScheduler(): void {
-  for (const t of [scanTimer, saleTimer, triggerTimer]) {
+  for (const t of [scanTimer, saleTimer, triggerTimer, reconcileTimer]) {
     if (t) clearInterval(t);
   }
-  scanTimer = saleTimer = triggerTimer = null;
+  scanTimer = saleTimer = triggerTimer = reconcileTimer = null;
 }
