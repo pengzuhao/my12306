@@ -27,8 +27,8 @@ const logger = new Logger('bot');
 /** 一条订单（可能含多名乘车人，聚合成一行） */
 export interface OrderRow {
   orderNo: string;
-  /** unpaid=待支付（未完成订单且票面为「待支付」）；paid=已支付/已出票 */
-  status: 'unpaid' | 'paid';
+  /** unpaid=待支付；paid=已支付/已出票/已出站；refunded=已退票 */
+  status: 'unpaid' | 'paid' | 'refunded';
   /** 12306 票面状态原文，如「待支付」/「已支付」/「已出票」 */
   statusText: string;
   /** 乘车日期+上车时间（北京时间，格式 YYYY-MM-DD HH:mm） */
@@ -151,12 +151,26 @@ function normPayLimit(s: string | null | undefined): string | null {
   return v;
 }
 
+/** 清理 12306 票面状态里的噪音：去掉「已退票(业务流水号:2EQ…)」的流水号部分 */
+function cleanStatusText(s: string): string {
+  return s.replace(/[（(].*?[）)]\s*$/, '').trim() || s;
+}
+
 /** AccumOrder → 对外 OrderRow（推导 status） */
 function toRow(a: AccumOrder): OrderRow {
+  const statusText = cleanStatusText(a.statusText);
+  let status: OrderRow['status'];
+  if (a.fromIncomplete && /待支付/.test(statusText)) {
+    status = 'unpaid';
+  } else if (/退票/.test(statusText)) {
+    status = 'refunded';
+  } else {
+    status = 'paid';
+  }
   return {
     orderNo: a.orderNo,
-    status: a.fromIncomplete && /待支付/.test(a.statusText) ? 'unpaid' : 'paid',
-    statusText: a.statusText,
+    status,
+    statusText,
     travelDateTime: a.travelDateTime,
     trainCode: a.trainCode,
     fromStation: a.fromStation,

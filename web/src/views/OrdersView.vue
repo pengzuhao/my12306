@@ -30,6 +30,16 @@ const fetchedAt = ref<number | null>(null);
 const cached = ref(false);
 /** 每秒跳动一次的"当前时间"，用于倒计时显示 */
 const tick = ref(Date.now());
+/** 状态多选过滤（空=全部） */
+const statusFilter = ref<OrderRow['status'][]>([]);
+
+/** 状态 → 标签风格 + 文案 */
+const STATUS_META: Record<OrderRow['status'], { type: 'danger' | 'success' | 'info'; label: string }> = {
+  unpaid: { type: 'danger', label: '待支付' },
+  paid: { type: 'success', label: '已支付' },
+  refunded: { type: 'info', label: '已退票' },
+};
+const statusOptions = Object.entries(STATUS_META).map(([value, m]) => ({ value, label: m.label }));
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let expiryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -37,6 +47,11 @@ let tickTimer: ReturnType<typeof setInterval> | null = null;
 let lastManual = 0;
 
 const unpaidOrders = computed(() => orders.value.filter((o) => o.status === 'unpaid'));
+
+/** 按状态多选过滤后的列表（未选任何状态时显示全部） */
+const filteredOrders = computed(() =>
+  statusFilter.value.length ? orders.value.filter((o) => statusFilter.value.includes(o.status)) : orders.value,
+);
 
 /** 距支付截止的剩余毫秒（负数表示已过期） */
 function remainingMs(o: OrderRow): number {
@@ -157,7 +172,22 @@ onBeforeUnmount(() => {
 
       <div v-if="errorMsg" style="color: #e6a23c; margin-bottom: 12px; font-size: 13px">{{ errorMsg }}</div>
 
-      <el-table :data="orders" border v-loading="loading" empty-text="暂无已购车票">
+      <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap">
+        <span style="font-size: 13px; color: #606266">状态筛选</span>
+        <el-select
+          v-model="statusFilter"
+          multiple
+          collapse-tags
+          collapse-tags-tooltip
+          placeholder="全部状态"
+          style="width: 220px"
+        >
+          <el-option v-for="o in statusOptions" :key="o.value" :label="o.label" :value="o.value" />
+        </el-select>
+        <span style="font-size: 12px; color: #909399">共 {{ filteredOrders.length }} 条（全部 {{ orders.length }} 条）</span>
+      </div>
+
+      <el-table :data="filteredOrders" border v-loading="loading" empty-text="暂无已购车票">
         <el-table-column label="订单号" width="150">
           <template #default="{ row }">
             <span class="mono">{{ row.orderNo }}</span>
@@ -165,8 +195,8 @@ onBeforeUnmount(() => {
         </el-table-column>
         <el-table-column label="状态" width="110">
           <template #default="{ row }">
-            <el-tag :type="row.status === 'unpaid' ? 'danger' : 'success'">
-              {{ row.status === 'unpaid' ? '待支付' : row.statusText || '已支付' }}
+            <el-tag :type="STATUS_META[row.status as OrderRow['status']].type">
+              {{ row.statusText || STATUS_META[row.status as OrderRow['status']].label }}
             </el-tag>
           </template>
         </el-table-column>

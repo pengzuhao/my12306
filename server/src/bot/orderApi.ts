@@ -68,31 +68,52 @@ export interface RawOrder {
 /**
  * 预热订单接口所需的页面状态：先 initDc 跑 UAM 单点登录链，再停在订单查询页。
  * 之后页面内发起的 fetch 会自动带上正确的 Referer（=ORDER_INIT）。
+ *
+ * 稳定性要点（实测）：ORDER_INIT 必须等到 networkidle——queryMyOrder.js 的
+ * document.ready 处理会触发额外请求/跳转，只等 domcontentloaded 会在 fetch
+ * 中途遇到导航，报 "TypeError: Failed to fetch"（执行上下文被销毁）。
+ * 最后校验页面仍停在订单页，被重定向到登录页则提前失败，不浪费一次请求。
  */
 export async function warmOrderPage(page: Page): Promise<void> {
   await page.goto(URLS.CONFIRM_INIT_DC, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => undefined);
   await page.waitForTimeout(1200);
-  await page.goto(URLS.ORDER_INIT, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => undefined);
+  await page.goto(URLS.ORDER_INIT, { waitUntil: 'networkidle', timeout: 25000 }).catch(() => undefined);
   await page.waitForTimeout(1500);
+  // 页面稳定校验：仍在订单页且未跳登录
+  const url = page.url();
+  if (!url.includes('/otn/queryOrder/init')) {
+    logger.warn('订单预热后页面不在订单页（可能登录失效）', { url: url.slice(0, 80) });
+    throw new Error('12306 登录可能已失效，页面被重定向（请重新扫码登录）');
+  }
 }
 
-/** 页面内 POST（同源、带 cookie），返回响应原文 */
+/** 页面内 POST（同源、带 cookie），返回响应原文；遇导航中断自动重试一次 */
 async function postText(page: Page, url: string, body: string): Promise<string> {
-  return page.evaluate(
-    async (args: { u: string; b: string }) => {
-      const res = await fetch(args.u, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          'X-Requested-With': 'XMLHttpRequest',
-        },
-        body: args.b,
-        credentials: 'include',
-      });
-      return res.text();
-    },
-    { u: url, b: body },
-  );
+  const doFetch = (): Promise<string> =>
+    page.evaluate(
+      async (args: { u: string; b: string }) => {
+        const res = await fetch(args.u, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: args.b,
+          credentials: 'include',
+        });
+        return res.text();
+      },
+      { u: url, b: body },
+    );
+  try {
+    return await doFetch();
+  } catch (e) {
+    // 页面发生导航会中断 evaluate（"Failed to fetch"），等页面稳定后重试一次
+    logger.warn('订单接口 fetch 中断，等待页面稳定后重试', { error: e instanceof Error ? e.message : String(e) });
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => undefined);
+    await page.waitForTimeout(1000);
+    return await doFetch();
+  }
 }
 
 /**
