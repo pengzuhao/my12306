@@ -31,6 +31,9 @@ export interface DateEngineInput {
   offsetDays?: number;
   validFrom: string;
   validUntil?: string | null;
+  /** 出发时间窗（HH:MM），仅工作周模式用于判断"今天的班次是否已错过" */
+  timeFrom?: string | null;
+  timeTo?: string | null;
 }
 
 export interface DateEntry {
@@ -68,9 +71,11 @@ const WD_NAMES = ['一', '二', '三', '四', '五', '六', '日'];
  * 计算推算日期列表。
  * @param input 规则输入
  * @param todayStr 今天（YYYY-MM-DD），仅生成 >= 今天 的日期；默认取北京时间今天
+ * @param nowStr 当前时刻（HH:MM，北京时间）；仅工作周模式用于判断今天的班次是否已错过
  */
-export async function computeDates(input: DateEngineInput, todayStr?: string): Promise<DateEntry[]> {
+export async function computeDates(input: DateEngineInput, todayStr?: string, nowStr?: string): Promise<DateEntry[]> {
   const today = todayStr ?? new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+  const now = nowStr ?? new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Shanghai', hour12: false }).slice(0, 5);
   const end = input.validUntil || addDays(today, 180);
   const offset = Math.round(input.offsetDays ?? 0);
   await ensureYears(yearsBetween(today, end));
@@ -91,47 +96,61 @@ export async function computeDates(input: DateEngineInput, todayStr?: string): P
   }
 
   if (input.dateMode === 'workweek') {
-    // 工作周模式：按工作日历推算，每周期只取首个/最后一个工作日
+    // 工作周模式：按工作日历推算，每周期只取首个/最后一个工作日。
+    //
+    // 周期锚点 = validFrom（用户指定的"开始日期"即该工作周的第一天；如调休补班日
+    // 9.20 周日补班，validFrom=9.20，则本周首个工作日就是 9.20，而不是去找周一）。
+    // 之后每隔 7*interval 天为一个周期。过去的日期按天过滤；若推算日恰好是今天，
+    // 还要看出发时间窗是否已错过——已错过则整个工作周跳过，从下个工作周开始
+    // （用户明确要求：时间已过就不应再买本周的票）。
     const edge = input.weekEdge;
     if (edge !== 'start' && edge !== 'end') return [];
     const interval = Math.max(1, Math.round(input.weekInterval ?? 1));
+    // 出发时间窗：判断"今天这班是否已经开走"。timeTo 优先，退化为 timeFrom。
+    const departDeadline = input.timeTo || input.timeFrom || null;
 
-    let cursor = today < input.validFrom ? input.validFrom : today;
-    // 对齐到本周周一（本周的工作周仍有剩余工作日时也要覆盖）
-    let weekMonday = addDays(cursor, -(weekdayOf(cursor) - 1));
+    const step = 7 * interval;
+    // 锚点对齐到不早于今天的周期起点（validIf 早于今天时快进，保持节奏对齐）
+    let weekStart = input.validFrom;
+    if (weekStart < today) {
+      const skips = Math.floor((Date.parse(today) - Date.parse(weekStart)) / 86_400_000 / step);
+      weekStart = addDays(weekStart, skips * step);
+    }
 
     const entries: DateEntry[] = [];
     let safety = 0;
-    while (weekMonday <= end && safety < 600) {
+    while (weekStart <= end && safety < 600) {
       safety++;
-      const weekSunday = addDays(weekMonday, 6);
+      const weekEnd = addDays(weekStart, 6);
       let picked: string | null = null;
       if (edge === 'start') {
-        // 首个工作日：从周一往后找第一个工作日
-        for (let d = weekMonday; d <= weekSunday; d = addDays(d, 1)) {
+        // 首个工作日：从周期起点往后找第一个工作日
+        for (let d = weekStart; d <= weekEnd; d = addDays(d, 1)) {
           if (isWorkday(d)) {
             picked = d;
             break;
           }
         }
       } else {
-        // 最后一个工作日：从周日往前找第一个工作日
-        for (let d = weekSunday; d >= weekMonday; d = addDays(d, -1)) {
+        // 最后一个工作日：从周期末尾往前找第一个工作日
+        for (let d = weekEnd; d >= weekStart; d = addDays(d, -1)) {
           if (isWorkday(d)) {
             picked = d;
             break;
           }
         }
       }
-      const nextMonday = addDays(weekMonday, 7 * interval);
+      const nextStart = addDays(weekStart, step);
       if (picked) {
         // 应用提前/延后偏移（负=提前，正=延后）
         const shifted = offset ? addDays(picked, offset) : picked;
-        // 常态目标日：周初=周一，周末=周五。实际取到的首个/最后一个工作日若与常态不同，
+        // 常态目标日：周初=周期起点，周末=起点+4。实际取到的首个/最后一个工作日若与常态不同，
         // 说明本周被节假日挤占（如国庆周），标记为顺延。
-        const naive = edge === 'start' ? weekMonday : addDays(weekMonday, 4);
+        const naive = edge === 'start' ? weekStart : addDays(weekStart, 4);
         const postponed = picked !== naive;
-        if (shifted >= today && shifted >= input.validFrom && shifted <= end) {
+        // 今天这班车是否已经开走：推算日=今天 且 当前时刻已晚于出发时间窗
+        const missedToday = shifted === today && departDeadline !== null && now >= departDeadline;
+        if (!missedToday && shifted >= today && shifted >= input.validFrom && shifted <= end) {
           const wd = weekdayOf(shifted);
           const parts: string[] = [];
           if (postponed) {
@@ -150,7 +169,7 @@ export async function computeDates(input: DateEngineInput, todayStr?: string): P
           });
         }
       }
-      weekMonday = nextMonday;
+      weekStart = nextStart;
     }
     return entries;
   }
@@ -193,7 +212,7 @@ export async function computeDates(input: DateEngineInput, todayStr?: string): P
 }
 
 /** 针对推算入参做预览（额外给出预估起售日期）；可直接传计划对象 */
-export async function previewForPlan(input: DateEngineInput, todayStr?: string): Promise<PreviewEntry[]> {
+export async function previewForPlan(input: DateEngineInput, todayStr?: string, nowStr?: string): Promise<PreviewEntry[]> {
   const entries = await computeDates(
     {
       dateMode: input.dateMode,
@@ -204,8 +223,11 @@ export async function previewForPlan(input: DateEngineInput, todayStr?: string):
       offsetDays: input.offsetDays,
       validFrom: input.validFrom,
       validUntil: input.validUntil,
+      timeFrom: input.timeFrom,
+      timeTo: input.timeTo,
     },
     todayStr,
+    nowStr,
   );
   return entries.map((e) => ({ ...e, estimatedSaleDate: addDays(e.travelDate, -DEFAULT_PRESALE_DAYS) }));
 }

@@ -149,6 +149,8 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
       offsetDays: body.offsetDays,
       validFrom: body.validFrom,
       validUntil: body.validUntil ?? null,
+      timeFrom: body.timeFrom ?? null,
+      timeTo: body.timeTo ?? null,
     });
     return entries;
   });

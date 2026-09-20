@@ -90,6 +90,8 @@ async function scanPlans(): Promise<void> {
         offsetDays: plan.offsetDays,
         validFrom: plan.validFrom,
         validUntil: plan.validUntil,
+        timeFrom: plan.timeFrom,
+        timeTo: plan.timeTo,
       });
       PlanDatesRepo.replaceForPlan(plan.id, entries.map((e) => ({ travelDate: e.travelDate, originalDate: e.originalDate, postponed: e.postponed, weekday: e.weekday })));
 

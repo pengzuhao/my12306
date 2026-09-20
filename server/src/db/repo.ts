@@ -282,6 +282,12 @@ export const PlanDatesRepo = {
            ON CONFLICT(plan_id, travel_date) DO UPDATE SET original_date = excluded.original_date, postponed = excluded.postponed, weekday = excluded.weekday`,
         ).run(nanoid(), planId, e.travelDate, e.originalDate, e.postponed ? 1 : 0, e.weekday);
       }
+      // 清理本次不再推算且尚未出行的旧条目（如规则/日历变化后本周已被跳过）。
+      // 已完成（done）的保留为历史记录。
+      const keep = entries.map((e) => e.travelDate);
+      db.prepare(
+        `DELETE FROM plan_dates WHERE plan_id = ? AND status = 'pending' AND travel_date NOT IN (SELECT value FROM json_each(?))`,
+      ).run(planId, JSON.stringify(keep));
     });
     tx();
   },

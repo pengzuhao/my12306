@@ -89,6 +89,44 @@ async function main(): Promise<void> {
   const bad = await computeDates({ dateMode: 'recurring', weekday: 9, validFrom: '2026-09-01' }, FIXED_TODAY);
   console.log(`\n无效 weekday 返回条目数：${bad.length}（应为 0）`);
 
+  // 6) 工作周锚点 + 已错过的出发窗口（复现 9.20 周日补班的真实场景）
+  //    validFrom=9.20（调休补班日，本周首个工作日就是 9.20），今天 9.20 晚上 20:00，
+  //    06:50 的车早已开走 → 本周应整体跳过，首个目标变成下个工作周 9.28。
+  const missed = await computeDates(
+    {
+      dateMode: 'workweek',
+      weekEdge: 'start',
+      weekInterval: 1,
+      validFrom: '2026-09-20',
+      validUntil: '2026-10-31',
+      timeFrom: '06:50',
+      timeTo: '07:00',
+    },
+    '2026-09-20',
+    '20:00',
+  );
+  show('workweek 锚点 9.20 且 06:50 已错过（应跳到 9.28）', missed);
+  const missedOk = missed.length > 0 && missed[0].travelDate === '2026-09-28' && !missed.some((e) => e.travelDate <= '2026-09-20');
+  console.log(`  → 首个目标为 9.28 且不含本周已错过日期：${missedOk}`);
+
+  // 6b) 同样的计划，但在发车前查询（05:00）→ 今天 9.20 的票应保留
+  const upcoming = await computeDates(
+    {
+      dateMode: 'workweek',
+      weekEdge: 'start',
+      weekInterval: 1,
+      validFrom: '2026-09-20',
+      validUntil: '2026-10-31',
+      timeFrom: '06:50',
+      timeTo: '07:00',
+    },
+    '2026-09-20',
+    '05:00',
+  );
+  show('workweek 锚点 9.20，05:00 未发车（应保留 9.20）', upcoming);
+  const upcomingOk = upcoming.length > 0 && upcoming[0].travelDate === '2026-09-20';
+  console.log(`  → 首个目标保留为今天 9.20：${upcomingOk}`);
+
   // 简单断言
   const ok =
     single.length === 1 &&
@@ -103,7 +141,10 @@ async function main(): Promise<void> {
     wwSkipsNational &&
     wwAllWorkday &&
     // 每 2 周的周五：原始日期落在周五
-    biweekly.every((e) => weekdayOf(e.originalDate) === 5);
+    biweekly.every((e) => weekdayOf(e.originalDate) === 5) &&
+    // 工作周锚点 + 已错过出发窗口：跳到 9.28；未错过时保留 9.20
+    missedOk &&
+    upcomingOk;
   console.log(`\n${ok ? '✅ 日期推算引擎测试通过' : '❌ 测试未通过，请检查'}`);
   process.exit(ok ? 0 : 1);
 }
