@@ -415,6 +415,22 @@ export const TasksRepo = {
       .all(planId, travelDate) as Record<string, unknown>[];
     return rows.map(rowToTask);
   },
+  /**
+   * 重置某一年"待执行/已跳过"的任务为 pending（新年份日历就绪后重算用）。
+   * 已成功/已失败/已取消的保持不动——那是历史结果，不回滚。
+   * @returns 重置的行数
+   */
+  resetForYear(year: number): number {
+    const info = getDb()
+      .prepare(
+        `UPDATE tasks
+         SET status = 'pending', sale_at = NULL, error = NULL, finished_at = NULL,
+             started_at = NULL, attempts = 0, updated_at = datetime('now')
+         WHERE travel_date LIKE ? AND status IN ('queried', 'skipped', 'pending')`,
+      )
+      .run(`${year}-%`);
+    return info.changes;
+  },
 };
 
 export const LogsRepo = {

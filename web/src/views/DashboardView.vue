@@ -117,6 +117,10 @@ watch(calPassenger, () => {
 const holidays = ref<HolidayDay[]>([]);
 /** 按自然年缓存：year -> 全年节假日数据。只有首次访问某年时才调接口 */
 const holidaysByYear = new Map<number, HolidayDay[]>();
+/** 按自然年缓存"该年放假安排是否尚未公布"，切月份时零延迟 */
+const pendingYears = new Map<number, boolean>();
+/** 当前展示年放假安排尚未公布（日历按自然周兜底，公布后自动更新） */
+const calendarPending = ref(false);
 
 async function reloadHolidays(): Promise<void> {
   const y = calMonth.value.getFullYear();
@@ -126,15 +130,19 @@ async function reloadHolidays(): Promise<void> {
   const cached = holidaysByYear.get(y);
   if (cached) {
     holidays.value = cached.filter((h) => h.date.startsWith(prefix));
+    calendarPending.value = pendingYears.get(y) ?? false;
     return;
   }
   // 首次访问该年：一次接口拿全年数据，之后该年内切月份不再请求
   try {
-    const yearDays = await calendarApi.holidaysOfYear(y);
-    holidaysByYear.set(y, yearDays);
-    holidays.value = yearDays.filter((h) => h.date.startsWith(prefix));
+    const res = await calendarApi.holidaysOfYear(y);
+    holidaysByYear.set(y, res.days);
+    pendingYears.set(y, res.calendarPending);
+    holidays.value = res.days.filter((h) => h.date.startsWith(prefix));
+    calendarPending.value = res.calendarPending;
   } catch {
     holidays.value = [];
+    calendarPending.value = false;
   }
 }
 
@@ -310,6 +318,16 @@ function onVisible(): void {
           <div v-if="ordersError" style="color: #e6a23c; margin-bottom: 6px; font-size: 12px">
             {{ ordersError }}（日历暂不可用，登录 12306 后刷新本页）
           </div>
+          <el-alert
+            v-if="calendarPending"
+            type="warning"
+            :closable="false"
+            style="margin-bottom: 6px; padding: 6px 10px"
+          >
+            <span style="font-size: 12px">
+              {{ calMonth.getFullYear() }} 年的放假安排尚未公布，日历暂按自然周显示。国务院发布后系统会自动更新。
+            </span>
+          </el-alert>
           <div style="font-size: 12px; color: #909399; margin-bottom: 6px">
             本月已标记 <b style="color: #67c23a">{{ monthTicketCount }}</b> 张已支付车票{{ calPassenger ? `（乘车人：${calPassenger}）` : '' }}
           </div>

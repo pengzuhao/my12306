@@ -34,6 +34,8 @@ export interface PlanDateEntry {
   postponed: boolean;
   isWorkday: boolean;
   note?: string;
+  /** 该年放假安排尚未公布，按自然周降级推算 */
+  calendarPending?: boolean;
   estimatedSaleDate: string;
   /** 关联的购票任务（可能还没生成） */
   task: TaskSnapshot | null;
@@ -91,13 +93,43 @@ export interface HolidayDay {
   holiday: string | null;
 }
 
+/** 节假日日历响应：days 为日期列表，calendarPending 表示该年放假安排尚未发布（按自然周兜底） */
+export interface HolidayResponse {
+  days: HolidayDay[];
+  /** 该年放假安排尚未公布，工作日判定退回自然周；数据就绪后后端会自动重算 */
+  calendarPending: boolean;
+}
+
 export const calendarApi = {
   /** 指定年月，返回该月每天的节假日信息 */
   holidays: (year: number, month: number) =>
-    http.get('/calendar/holidays', { params: { year, month } }).then((r) => r.data as HolidayDay[]),
+    http.get('/calendar/holidays', { params: { year, month } }).then((r) => r.data as HolidayResponse),
   /** 指定自然年，返回全年 12 个月的节假日信息（供前端按年缓存，切月份时零延迟） */
   holidaysOfYear: (year: number) =>
-    http.get('/calendar/holidays', { params: { year } }).then((r) => r.data as HolidayDay[]),
+    http.get('/calendar/holidays', { params: { year } }).then((r) => r.data as HolidayResponse),
+};
+
+// ---- 席别与车次（从 12306 透传，不在前端写死） ----
+export interface SeatTypeOption {
+  code: string;
+  name: string;
+}
+
+export interface TrainOption {
+  trainCode: string;
+  fromStation: string;
+  toStation: string;
+  departTime: string;
+  arriveTime: string;
+  duration: string;
+  /** 该车次余票里出现的席别代码列表 */
+  seatTypes: string[];
+}
+
+export const metaApi = {
+  seatTypes: () => http.get('/meta/seat-types').then((r) => r.data as SeatTypeOption[]),
+  trains: (from: string, to: string, date: string) =>
+    http.get('/trains/search', { params: { from, to, date } }).then((r) => r.data as { trains: TrainOption[] }),
 };
 
 // ---- 飞书 ----

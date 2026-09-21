@@ -4,12 +4,16 @@
  * 数据源（按优先级）：
  *  1. 本地缓存 data/holidays.json（首次拉取后持久化，离线可用）
  *  2. holiday-cn（GitHub：NateScarlet/holiday-cn，收录国务院每年放假安排，含调休补班）
- *  3. timor.tech 逐日接口（兜底）
+ *  3. timor.tech 逐日接口（兜底：holiday-cn 拉不到时，按日查询补齐该年）
  *
  * 工作日定义：
  *  - 命中节假日数据且 isOffDay=true  → 放假（非工作日）
  *  - 命中节假日数据且 isOffDay=false → 调休补班（工作日）
  *  - 未命中数据 → 按自然周：周一至周五为工作日，周六日为休息日
+ *
+ * 新年份就绪回调：国务院通常在当年末发布下一年放假安排，发布前该年数据
+ * 拉不到。一旦某年从"缺失"变为"就绪"（用户补录或数据源更新），通过
+ * onCalendarReady 注册的回调会被触发，调度器据此重算该年的购票执行时间。
  */
 import fs from 'node:fs';
 import { HOLIDAY_CACHE_PATH } from '../config.js';
@@ -27,6 +31,49 @@ type HolidayMap = Record<string, HolidayEntry>;
 
 const cache = new Map<number, HolidayMap>();
 let loaded = false;
+
+/** 某年数据是否为"降级"状态：数据源拉取失败，工作日判定退回自然周兜底 */
+const degradedYears = new Set<number>();
+
+/** 节假日数据就绪回调（某年从缺失变为可用时触发） */
+type CalendarReadyListener = (year: number) => void;
+const readyListeners: CalendarReadyListener[] = [];
+
+/**
+ * 注册"新年份节假日数据就绪"回调。
+ * 调度器用它实现：一旦拿到新年份的日历，立刻刷新该年份的购票执行时间。
+ * @returns 取消注册的函数
+ */
+export function onCalendarReady(listener: CalendarReadyListener): () => void {
+  readyListeners.push(listener);
+  return () => {
+    const i = readyListeners.indexOf(listener);
+    if (i >= 0) readyListeners.splice(i, 1);
+  };
+}
+
+/** 通知某年数据已就绪（只在"此前缺失/降级 → 本次成功"时才通知，避免重复） */
+function notifyReadyIfNewlyAvailable(year: number, newlyFetched: boolean): void {
+  if (!newlyFetched) return;
+  degradedYears.delete(year);
+  for (const fn of readyListeners) {
+    try {
+      fn(year);
+    } catch (e) {
+      logger.warn('calendarReady 回调执行失败', e);
+    }
+  }
+}
+
+/** 某年当前是否处于降级状态（数据源拉取失败，按自然周兜底） */
+export function isYearDegraded(year: number): boolean {
+  return degradedYears.has(year);
+}
+
+/** 日期所在年是否处于降级状态 */
+export function isDateDegraded(date: string): boolean {
+  return isYearDegraded(Number(date.slice(0, 4)));
+}
 
 function loadCache(): void {
   if (loaded) return;
@@ -76,7 +123,7 @@ async function fetchYearFromHolidayCn(year: number): Promise<HolidayMap | null> 
 async function fetchDayFromTimor(date: string): Promise<HolidayEntry | null> {
   const url = `http://timor.tech/api/holiday/info/${date}`;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
     if (!res.ok) return null;
     const data = (await res.json()) as {
       code: number;
@@ -96,6 +143,13 @@ async function fetchDayFromTimor(date: string): Promise<HolidayEntry | null> {
 
 /**
  * 确保指定年份的节假日数据已就绪。
+ *
+ * 拉取策略（逐年）：
+ *  1. 缓存命中 → 直接可用
+ *  2. holiday-cn 拉取成功 → 写缓存并持久化
+ *  3. holiday-cn 失败 → timor.tech 逐日查询补齐该年（调休/放假都能覆盖）
+ *  4. 两个数据源都失败 → 标记该年为降级（按自然周兜底），不抛错
+ *
  * @returns 实际"已确认"（缓存命中或拉取成功）的年份集合——
  *          拉取失败的年份不在其中，调用方应据此决定是否继续推算。
  */
@@ -107,9 +161,63 @@ export async function ensureYears(years: number[]): Promise<Set<number>> {
     if (map) {
       cache.set(year, map);
       persistCache();
+      notifyReadyIfNewlyAvailable(year, true);
+      continue;
     }
+    // holiday-cn 拉不到（数据源未更新或网络问题）：用 timor 逐日查询补齐
+    const fallback = await fetchYearFromTimor(year);
+    if (fallback) {
+      cache.set(year, fallback);
+      persistCache();
+      logger.info(`timor 逐日补齐成功：${year} 年 ${Object.keys(fallback).length} 条`);
+      notifyReadyIfNewlyAvailable(year, true);
+      continue;
+    }
+    // 两个数据源都失败：标记降级，工作日判定退回自然周兜底
+    degradedYears.add(year);
+    logger.warn(`${year} 年节假日数据两个数据源均拉取失败，该年按自然周降级推算`, undefined);
   }
   return new Set(years.filter((y) => cache.has(y)));
+}
+
+/**
+ * 用 timor.tech 逐日查询补齐一年的节假日数据（调休补班/放假都能覆盖）。
+ *
+ * 不查全年 365 天（每次网络往返 + 超时，接口不通时会卡一小时）：
+ *  1) 先用国庆节当天探测一次——接口不通立即放弃该年（快速失败）
+ *  2) 探测成功才查候选节假日窗口（元旦/春节/清明/五一/端午/中秋/国庆，
+ *     每个窗口前后多查几天覆盖调休），总计约 60 次，可控
+ */
+async function fetchYearFromTimor(year: number): Promise<HolidayMap | null> {
+  const p = (m: number, d: number) => `${year}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  // 1) 探测：国庆节当天必然是节假日，接口可用与否一次就能判定
+  const probe = await fetchDayFromTimor(p(10, 1));
+  if (!probe) return null;
+
+  const map: HolidayMap = { [p(10, 1)]: probe };
+  // 2) 候选节假日窗口（含调休补班常见的相邻日期）
+  const candidates = [
+    ...range(1, 1, 3), // 元旦
+    ...range(2, 1, 20), // 春节（公历不固定，拉宽窗口）
+    ...range(4, 2, 8), // 清明
+    ...range(5, 1, 6), // 五一
+    ...range(6, 1, 10), // 端午
+    ...range(9, 1, 10), // 中秋
+    ...range(10, 1, 10), // 国庆
+  ];
+  const dates = new Set(candidates.map(([m, d]) => p(m, d)));
+  for (const date of dates) {
+    if (map[date]) continue;
+    const entry = await fetchDayFromTimor(date);
+    if (entry) map[date] = entry;
+  }
+  return map;
+
+  function range(m: number, dFrom: number, dTo: number): Array<[number, number]> {
+    const out: Array<[number, number]> = [];
+    for (let d = dFrom; d <= dTo; d++) out.push([m, d]);
+    return out;
+  }
 }
 
 /** 某一年的节假日数据是否已确认（缓存命中）。供推算/执行做前提校验用 */

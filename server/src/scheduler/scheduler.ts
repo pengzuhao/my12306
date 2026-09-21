@@ -19,7 +19,7 @@ import { PlansRepo, PlanDatesRepo, TasksRepo, PassengersRepo, RailwayAccountRepo
 import { computeDates } from '../plans/date-engine.js';
 import { Logger } from '../logger.js';
 import { wsHub } from '../ws/hub.js';
-import { today, addDays, isDateReady } from '../calendar/holidays.js';
+import { today, addDays, isDateReady, onCalendarReady } from '../calendar/holidays.js';
 import { getContext, getSessionState } from '../bot/session.js';
 import { purchaseTicket } from '../bot/order.js';
 import { findBlockingUnpaid } from '../bot/orders.js';
@@ -450,6 +450,30 @@ let scanTimer: NodeJS.Timeout | null = null;
 let saleTimer: NodeJS.Timeout | null = null;
 let triggerTimer: NodeJS.Timeout | null = null;
 let reconcileTimer: NodeJS.Timeout | null = null;
+/** calendarReady 回调的取消注册函数 */
+let calendarReadyUnsub: (() => void) | null = null;
+
+/**
+ * 新年份节假日数据就绪后的刷新（用户明确要求：一旦拿到新年份日历，要刷新该年的购票执行时间）。
+ *
+ * 场景：计划推算到 2027 年，但当时 2027 放假安排尚未发布，只能按自然周降级推算，
+ * 任务可能建在错误的日期上（如把国庆放假当天当工作日）。等数据就绪后：
+ *  1) 立即重扫计划，用新日历重算 plan_dates（replaceForPlan 会覆盖旧推算）
+ *  2) 把该年"待起售/已跳过"的任务重置为 pending，让起售查询按新日期重跑
+ *  3) 已成功/已失败的保持不动（历史结果不回滚）
+ */
+async function refreshForNewCalendarYear(year: number): Promise<void> {
+  logger.info('节假日数据就绪，刷新该年购票执行时间', { year });
+  try {
+    // 先把该年可能"日期已错"的任务重置，再重扫计划（scanPlans 会按新日历重建任务）
+    const reset = TasksRepo.resetForYear(year);
+    if (reset) logger.info('已重置该年待执行任务，等待按新日历重算', { year, reset });
+    await scanPlans();
+    void resolveSaleTimes();
+  } catch (e) {
+    logger.error('新年份日历刷新失败', { year, error: e });
+  }
+}
 
 export function startScheduler(): void {
   if (scanTimer) return;
@@ -461,6 +485,10 @@ export function startScheduler(): void {
   triggerTimer = setInterval(() => void triggerDueTasks(), 1000);
   // 独立对账：未支付订单过期后自动回滚并重新下单，不依赖是否有到点任务
   reconcileTimer = setInterval(() => void reconcileBeforeSale().catch((e) => logger.warn('对账循环异常', e)), RECONCILE_MIN_INTERVAL_MS);
+  // 新年份节假日数据就绪时（如 2027 放假安排发布），立即重算该年的购票执行时间
+  calendarReadyUnsub = onCalendarReady((year) => {
+    void refreshForNewCalendarYear(year);
+  });
   logger.info('调度器已启动（计划扫描 5 分钟 / 起售查询 1 分钟 / 触发器 1 秒 / 对账 10 分钟）');
 }
 
@@ -469,4 +497,8 @@ export function stopScheduler(): void {
     if (t) clearInterval(t);
   }
   scanTimer = saleTimer = triggerTimer = reconcileTimer = null;
+  if (calendarReadyUnsub) {
+    calendarReadyUnsub();
+    calendarReadyUnsub = null;
+  }
 }

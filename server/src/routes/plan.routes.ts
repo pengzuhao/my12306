@@ -3,13 +3,14 @@
  */
 import type { FastifyInstance, FastifyPluginCallback } from 'fastify';
 import { z } from 'zod';
-import { PassengersRepo, PlansRepo, PlanDatesRepo, TasksRepo } from '../db/repo.js';
+import { PassengersRepo, PlansRepo, PlanDatesRepo, TasksRepo, RailwayAccountRepo } from '../db/repo.js';
 import { currentUser } from './auth.routes.js';
 import { previewForPlan } from '../plans/date-engine.js';
-import { ensureYears, isWorkday, holidayName, addDays } from '../calendar/holidays.js';
+import { ensureYears, isWorkday, holidayName, addDays, isYearDegraded } from '../calendar/holidays.js';
 import { Logger } from '../logger.js';
 import { nanoid } from 'nanoid';
 import { DEFAULT_PRESALE_DAYS } from '../config.js';
+import { SEAT_NAMES } from '../bot/constants.js';
 
 const logger = new Logger('plan');
 
@@ -180,6 +181,7 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
           postponed: d.postponed,
           isWorkday: isWorkday(d.travelDate),
           note: undefined,
+          calendarPending: isYearDegraded(Number(d.travelDate.slice(0, 4))) || undefined,
           estimatedSaleDate: addDays(d.travelDate, -DEFAULT_PRESALE_DAYS),
           task,
         };
@@ -215,6 +217,10 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
    *  - 不传 month：返回该自然年全部 12 个月（供前端按年缓存，切月份时零延迟）
    * 节假日数据可能跨年（如 10 月含国庆），自动加载相邻年份。
    * 后端按自然年缓存（holidays.json 持久化 + 内存），只有首次查询某年才调外部接口。
+   *
+   * 返回体额外带 calendarPending：该年放假安排尚未发布（数据源拉取失败），
+   * 工作日判定退回自然周兜底。前端据此提示"该年放假安排尚未公布"，
+   * 数据就绪后调度器会自动重算，前端刷新即可看到更新。
    */
   app.get('/api/calendar/holidays', async (request, reply) => {
     const { year, month } = request.query as { year?: string; month?: string };
@@ -236,7 +242,55 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
         out.push({ date: dateStr, isWorkday: isWorkday(dateStr), holiday: holidayName(dateStr) });
       }
     }
-    return out;
+    return { days: out, calendarPending: isYearDegraded(y) };
+  });
+
+  /**
+   * 席别选项（从 12306 透传，不写死在前端）。
+   * 来源于余票查询接口的席别字段映射（SEAT_NAMES），
+   * 12306 调整席别时只需改 constants.ts，前端自动同步。
+   * 商务座不纳入可选：用户明确要求不买商务座，常规席别售罄即失败告警。
+   */
+  app.get('/api/meta/seat-types', async () => {
+    return Object.entries(SEAT_NAMES)
+      .filter(([code]) => code !== 'SWZ' && code !== 'WZ' && code !== 'QT')
+      .map(([code, name]) => ({ code, name }));
+  });
+
+  /**
+   * 查询实际可购车次（从 12306 透传，不写死车次列表）。
+   * 需已登录 12306：用真实余票查询结果帮用户选车次，避免填错车次号。
+   */
+  app.get('/api/trains/search', async (request, reply) => {
+    const user = currentUser();
+    const { from, to, date } = request.query as { from?: string; to?: string; date?: string };
+    if (!from || !to || !date) return reply.code(400).send({ error: '请提供出发站、到达站和乘车日期' });
+    const acc = RailwayAccountRepo.get(user.id);
+    if (!acc || acc.status !== 'active') {
+      return reply.code(400).send({ error: '12306 未登录，请先在顶栏扫码登录后查询车次' });
+    }
+    try {
+      const { getContext } = await import('../bot/session.js');
+      const { queryTrains } = await import('../bot/tickets.js');
+      const ctx = await getContext(user.id);
+      const trains = await queryTrains(ctx, { trainDate: date, fromStation: from, toStation: to });
+      return {
+        trains: trains.map((t) => ({
+          trainCode: t.trainCode,
+          fromStation: t.fromStation,
+          toStation: t.toStation,
+          departTime: t.departTime,
+          arriveTime: t.arriveTime,
+          duration: t.duration,
+          /** 余票里出现的席别（透传给前端做选项，不写死） */
+          seatTypes: Object.keys(t.seats),
+        })),
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.warn('车次查询失败', { by: user.username, from, to, date, error: msg });
+      return reply.code(400).send({ error: msg });
+    }
   });
 
   done();

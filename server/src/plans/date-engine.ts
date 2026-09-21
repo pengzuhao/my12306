@@ -19,7 +19,7 @@
  *
  * 输出"具体购票日期列表"，发生顺延的条目额外标注。
  */
-import { addDays, ensureYears, holidayName, isHoliday, isWorkday, nextWorkday, weekdayOf } from '../calendar/holidays.js';
+import { addDays, ensureYears, holidayName, isHoliday, isWorkday, nextWorkday, weekdayOf, isDateDegraded } from '../calendar/holidays.js';
 import { DEFAULT_PRESALE_DAYS } from '../config.js';
 
 export interface DateEngineInput {
@@ -49,6 +49,8 @@ export interface DateEntry {
   isWorkday: boolean;
   /** 节假日名称（顺延原因等说明） */
   note?: string;
+  /** 该年节假日数据未就绪（按自然周降级推算，实际放假安排公布后会重算） */
+  calendarPending?: boolean;
 }
 
 export interface PreviewEntry extends DateEntry {
@@ -78,15 +80,11 @@ export async function computeDates(input: DateEngineInput, todayStr?: string, no
   const now = nowStr ?? new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Shanghai', hour12: false }).slice(0, 5);
   const end = input.validUntil || addDays(today, 180);
   const offset = Math.round(input.offsetDays ?? 0);
-  // 节假日数据是推算的前提：workweek 模式完全依赖它判定工作日。
-  // 拉取失败的年份必须让调用方知道（返回成功集合，缺失则报错），否则会按
-  // 自然周静默推算出错误日期（如国庆周没数据 → 把放假当天当工作日）。
+  // 节假日数据尽量就绪：拉取失败的年份会按自然周降级推算（isWorkday 兜底），
+  // 并在条目上打 calendarPending 标记，提示"实际放假安排公布后会重算"。
+  // 不再整体抛错——否则一个未来年份没数据，整个计划的推算/预览/任务生成都瘫痪。
   const needed = yearsBetween(today, end);
-  const ready = await ensureYears(needed);
-  const missingYears = needed.filter((y) => !ready.has(y));
-  if (missingYears.length) {
-    throw new Error(`节假日数据未就绪：${missingYears.join('、')} 年的放假安排拉取失败，暂无法推算工作日历`);
-  }
+  await ensureYears(needed);
 
   if (input.dateMode === 'single') {
     const d = input.travelDate;
@@ -99,6 +97,7 @@ export async function computeDates(input: DateEngineInput, todayStr?: string, no
         postponed: false,
         isWorkday: isWorkday(d),
         note: holidayName(d) ? `法定节假日：${holidayName(d)}` : undefined,
+        calendarPending: isDateDegraded(d) || undefined,
       },
     ];
   }
@@ -187,6 +186,8 @@ export async function computeDates(input: DateEngineInput, todayStr?: string, no
           }
           if (wd >= 6 && isWorkday(shifted)) parts.push(`调休补班：本周${edge === 'start' ? '首个' : '最后一个'}工作日为 ${shifted}（周${WD_NAMES[wd - 1]}）`);
           if (offset) parts.push(offset < 0 ? `提前 ${-offset} 天：${picked} → ${shifted}` : `延后 ${offset} 天：${picked} → ${shifted}`);
+          const pending = isDateDegraded(shifted);
+          if (pending) parts.push(`${shifted.slice(0, 4)} 年放假安排尚未公布，暂按自然周推算`);
           entries.push({
             travelDate: shifted,
             originalDate: naive ?? picked,
@@ -194,6 +195,7 @@ export async function computeDates(input: DateEngineInput, todayStr?: string, no
             postponed,
             isWorkday: isWorkday(shifted),
             note: parts.join('；') || undefined,
+            calendarPending: pending || undefined,
           });
         }
       }
@@ -224,6 +226,8 @@ export async function computeDates(input: DateEngineInput, todayStr?: string, no
     if (shifted >= today && shifted <= end) {
       const parts: string[] = [];
       if (offset) parts.push(offset < 0 ? `提前 ${-offset} 天：${cursor} → ${shifted}` : `延后 ${offset} 天：${cursor} → ${shifted}`);
+      const pending = isDateDegraded(shifted);
+      if (pending) parts.push(`${shifted.slice(0, 4)} 年放假安排尚未公布，暂按自然周推算`);
       entries.push({
         travelDate: shifted,
         originalDate: cursor,
@@ -231,6 +235,7 @@ export async function computeDates(input: DateEngineInput, todayStr?: string, no
         postponed: false,
         isWorkday: isWorkday(shifted),
         note: parts.join('；') || undefined,
+        calendarPending: pending || undefined,
       });
     }
     cursor = addDays(cursor, 7 * interval);

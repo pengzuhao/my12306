@@ -5,10 +5,12 @@ import {
   planApi,
   passengerApi,
   calendarApi,
+  metaApi,
   type PlanForm,
   type HolidayDay,
   type PlanDateEntry,
   type TaskSnapshot,
+  type SeatTypeOption,
 } from '../api';
 
 interface Passenger {
@@ -22,6 +24,17 @@ interface Plan extends PlanForm {
   id: string;
   status: string;
 }
+
+// ---- 席别与车次：从 12306 透传，不写死在前端 ----
+/** 席别选项（后端来自 12306 余票字段映射） */
+const seatTypeOptions = ref<SeatTypeOption[]>([]);
+/** 席别代码 → 中文名映射（由透传的选项派生，不在前端写死） */
+const seatTypeNameMap = computed<Record<string, string>>(() =>
+  Object.fromEntries(seatTypeOptions.value.map((s) => [s.code, s.name])),
+);
+/** 车次搜索：远程加载真实可购车次（需登录 12306） */
+const trainLoading = ref(false);
+const trainOptions = ref<Array<{ code: string; label: string }>>([]);
 
 const plans = ref<Plan[]>([]);
 const passengers = ref<Passenger[]>([]);
@@ -103,8 +116,9 @@ async function pvShift(delta: number): Promise<void> {
   const y = target.getFullYear();
   if (!pvHolidaysByYear.has(y)) {
     try {
-      const yearDays = await calendarApi.holidaysOfYear(y);
-      pvHolidaysByYear.set(y, yearDays);
+      const res = await calendarApi.holidaysOfYear(y);
+      pvHolidaysByYear.set(y, res.days);
+      pvPendingYears.set(y, res.calendarPending);
     } catch {
       ElMessage.error(`${y} 年节假日数据加载失败，暂无法查看该月日历`);
       return;
@@ -118,6 +132,10 @@ async function pvShift(delta: number): Promise<void> {
 const pvHolidays = ref<HolidayDay[]>([]);
 /** 按自然年缓存：year -> 全年节假日数据。只有首次访问某年时才调接口 */
 const pvHolidaysByYear = new Map<number, HolidayDay[]>();
+/** 按自然年缓存"该年放假安排是否尚未公布" */
+const pvPendingYears = new Map<number, boolean>();
+/** 预览日历当前年放假安排尚未公布 */
+const pvCalendarPending = ref(false);
 
 async function reloadPvHolidays(): Promise<void> {
   const y = pvMonth.value.getFullYear();
@@ -127,17 +145,21 @@ async function reloadPvHolidays(): Promise<void> {
   const cached = pvHolidaysByYear.get(y);
   if (cached) {
     pvHolidays.value = cached.filter((h) => h.date.startsWith(prefix));
+    pvCalendarPending.value = pvPendingYears.get(y) ?? false;
     return;
   }
   // 首次访问该年：一次接口拿全年数据，之后该年内切月份不再请求
   // 失败时清空该年标记并提示——节假日数据是工作周推算的前提，不能静默吞掉
   try {
-    const yearDays = await calendarApi.holidaysOfYear(y);
-    pvHolidaysByYear.set(y, yearDays);
-    pvHolidays.value = yearDays.filter((h) => h.date.startsWith(prefix));
+    const res = await calendarApi.holidaysOfYear(y);
+    pvHolidaysByYear.set(y, res.days);
+    pvPendingYears.set(y, res.calendarPending);
+    pvHolidays.value = res.days.filter((h) => h.date.startsWith(prefix));
+    pvCalendarPending.value = res.calendarPending;
   } catch {
     pvHolidaysByYear.delete(y);
     pvHolidays.value = [];
+    pvCalendarPending.value = false;
     ElMessage.error(`${y} 年节假日数据加载失败，日历标记暂不可用`);
   }
 }
@@ -155,7 +177,9 @@ async function pvToFirst(): Promise<void> {
   const y = Number(first.travelDate.slice(0, 4));
   if (!pvHolidaysByYear.has(y)) {
     try {
-      pvHolidaysByYear.set(y, await calendarApi.holidaysOfYear(y));
+      const res = await calendarApi.holidaysOfYear(y);
+      pvHolidaysByYear.set(y, res.days);
+      pvPendingYears.set(y, res.calendarPending);
     } catch {
       ElMessage.error(`${y} 年节假日数据加载失败，日历标记暂不可用`);
     }
@@ -163,13 +187,10 @@ async function pvToFirst(): Promise<void> {
   pvMonth.value = new Date(y, Number(first.travelDate.slice(5, 7)) - 1, 1);
 }
 
-/** 席别代码 → 中文名（计划列表展示用） */
+/** 席别代码 → 中文名（由后端透传的席别选项派生，不写死） */
 function seatTypeName(codes?: string[] | null): string {
-  if (!codes || !codes.length) return '二等座';
-  const map: Record<string, string> = {
-    ZE: '二等座', ZY: '一等座', TZ: '特等座', YW: '硬卧', RW: '软卧', GR: '高级软卧', RZ: '软座', YZ: '硬座',
-  };
-  return codes.map((c) => map[c] ?? c).join('/');
+  if (!codes || !codes.length) return '未指定';
+  return codes.map((c) => seatTypeNameMap.value[c] ?? c).join('/');
 }
 
 function emptyForm(): PlanForm {
@@ -197,49 +218,85 @@ function emptyForm(): PlanForm {
 
 const weekdayNames = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 const seatOptions = ['A', 'B', 'C', 'D', 'F'];
-/** 席别选项（不含商务座 SWZ：用户明确要求不买商务座） */
-const seatTypeOptions = [
-  { code: 'ZE', name: '二等座' },
-  { code: 'ZY', name: '一等座' },
-  { code: 'TZ', name: '特等座' },
-  { code: 'YW', name: '硬卧' },
-  { code: 'RW', name: '软卧' },
-  { code: 'GR', name: '高级软卧' },
-  { code: 'RZ', name: '软座' },
-  { code: 'YZ', name: '硬座' },
-];
+const seatPositionHint: Record<string, string> = { A: '靠窗', B: '中间', C: '过道', D: '过道', F: '靠窗' };
 
 async function load(): Promise<void> {
   plans.value = (await planApi.list()) as Plan[];
   passengers.value = (await passengerApi.list()) as Passenger[];
 }
 
+/** 站点远程搜索（12306 真实站点库，支持拼音/缩写） */
+const stationLoading = ref(false);
+async function searchStations(keyword: string, cb: (items: Array<{ value: string }>) => void): Promise<void> {
+  if (!keyword) return cb([]);
+  stationLoading.value = true;
+  try {
+    const list = await planApi.stations(keyword);
+    cb(list.map((s: { name: string }) => ({ value: s.name })));
+  } catch {
+    cb([]);
+  } finally {
+    stationLoading.value = false;
+  }
+}
+
+/**
+ * 查询真实可购车次（从 12306 透传）。需已登录 12306。
+ * 查到后自动把席别选项收窄为"这些车次实际有的席别"，避免选了不存在的席别。
+ */
+async function searchTrains(): Promise<void> {
+  if (!editing.fromStation || !editing.toStation) {
+    ElMessage.warning('请先填写出发站和到达站');
+    return;
+  }
+  const date = editing.dateMode === 'single' ? editing.travelDate : editing.validFrom;
+  if (!date) {
+    ElMessage.warning('请先选择乘车日期或生效日期');
+    return;
+  }
+  trainLoading.value = true;
+  try {
+    const res = await metaApi.trains(editing.fromStation, editing.toStation, date);
+    trainOptions.value = res.trains.map((t) => ({
+      code: t.trainCode,
+      label: `${t.trainCode} ${t.fromStation}→${t.toStation} ${t.departTime}→${t.arriveTime}（${t.duration}）`,
+    }));
+    if (!res.trains.length) {
+      ElMessage.warning('该日期/区间的车次暂不可查（可能未到预售期或无直达车）');
+    } else {
+      ElMessage.success(`查到 ${res.trains.length} 趟车次`);
+    }
+  } catch (e) {
+    ElMessage.error((e as { response?: { data?: { error?: string } } }).response?.data?.error ?? '车次查询失败');
+  } finally {
+    trainLoading.value = false;
+  }
+}
+
 function openNew(): void {
   Object.assign(editing, emptyForm());
   editing.passengerIds = passengers.value.length ? [passengers.value[0].id] : [];
+  trainOptions.value = [];
   dialogVisible.value = true;
 }
 
 function openEdit(p: Plan): void {
   Object.assign(editing, JSON.parse(JSON.stringify(p)));
+  trainOptions.value = (p.trainNumbers ?? []).map((code) => ({ code, label: code }));
   dialogVisible.value = true;
 }
 
 async function save(): Promise<void> {
   if (!editing.name || !editing.fromStation || !editing.toStation) {
-    ElMessage.warning('请填写计划名称与起止站点');
+    ElMessage.warning('请填写计划名称与出发站、到达站');
     return;
   }
   if (!editing.passengerIds.length) {
     ElMessage.warning('请至少选择一名乘车人');
     return;
   }
-  if (!editing.seatPositions || !editing.seatPositions.length) {
-    ElMessage.warning('请选择座位偏好（必填：A/F 靠窗、C/D 过道）');
-    return;
-  }
   if (!editing.seatTypes || !editing.seatTypes.length) {
-    ElMessage.warning('请选择席别（必填：购票时按所选席别严格匹配）');
+    ElMessage.warning('请至少选择一种席别');
     return;
   }
   try {
@@ -260,6 +317,31 @@ async function setStatus(id: string, status: 'active' | 'paused' | 'deleted'): P
 async function confirmDelete(id: string): Promise<void> {
   await ElMessageBox.confirm('确认删除该计划？关联任务将不再执行', '提示', { type: 'warning' });
   await setStatus(id, 'deleted');
+}
+
+/**
+ * 操作栏「更多」下拉的命令分发。
+ *
+ * 操作栏只保留一个主操作（详情）+ 一个下拉菜单（编辑 / 暂停·恢复 / 删除），
+ * 避免一行挤 5 个按钮；危险操作（删除）走二次确认。
+ */
+async function handlePlanCommand(cmd: string, row: Plan): Promise<void> {
+  switch (cmd) {
+    case 'edit':
+      openEdit(row);
+      break;
+    case 'pause':
+      await setStatus(row.id, 'paused');
+      break;
+    case 'resume':
+      await setStatus(row.id, 'active');
+      break;
+    case 'delete':
+      await confirmDelete(row.id);
+      break;
+    default:
+      break;
+  }
 }
 
 async function preview(): Promise<void> {
@@ -356,7 +438,25 @@ function closeDetail(): void {
   detailVisible.value = false;
 }
 
-onMounted(load);
+onMounted(async () => {
+  await load();
+  // 席别选项从后端拉取（源自 12306 余票字段），前端不写死
+  try {
+    seatTypeOptions.value = await metaApi.seatTypes();
+  } catch {
+    // 拉取失败时给一组兜底，保证表单可用
+    seatTypeOptions.value = [
+      { code: 'ZE', name: '二等座' },
+      { code: 'ZY', name: '一等座' },
+      { code: 'TZ', name: '特等座' },
+      { code: 'YW', name: '硬卧' },
+      { code: 'RW', name: '软卧' },
+      { code: 'GR', name: '高级软卧' },
+      { code: 'RZ', name: '软座' },
+      { code: 'YZ', name: '硬座' },
+    ];
+  }
+});
 </script>
 
 <template>
@@ -414,13 +514,22 @@ onMounted(load);
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="240">
+        <el-table-column label="操作" width="130" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" @click="openDetail(row)">详情</el-button>
-            <el-button size="small" @click="openEdit(row)">编辑</el-button>
-            <el-button v-if="row.status !== 'paused'" size="small" @click="setStatus(row.id, 'paused')">暂停</el-button>
-            <el-button v-if="row.status === 'paused'" size="small" type="success" @click="setStatus(row.id, 'active')">恢复</el-button>
-            <el-button size="small" type="danger" @click="confirmDelete(row.id)">删除</el-button>
+            <div class="plan-actions">
+              <el-button size="small" type="primary" plain @click="openDetail(row)">详情</el-button>
+              <el-dropdown trigger="click" @command="(cmd: string) => void handlePlanCommand(cmd, row)">
+                <el-button size="small" plain>更多<span class="plan-caret" /></el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="edit">编辑</el-dropdown-item>
+                    <el-dropdown-item v-if="row.status !== 'paused'" command="pause">暂停执行</el-dropdown-item>
+                    <el-dropdown-item v-else command="resume">恢复执行</el-dropdown-item>
+                    <el-dropdown-item command="delete" divided>删除计划</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -497,46 +606,66 @@ onMounted(load);
       </template>
     </el-drawer>
 
-    <el-dialog v-model="dialogVisible" :title="editing.id ? '编辑计划' : '新建计划'" width="640px">
-      <el-form label-width="110px">
+    <el-dialog v-model="dialogVisible" :title="editing.id ? '编辑计划' : '新建购票计划'" width="660px" :close-on-click-modal="false">
+      <el-form label-width="104px" label-position="right">
+        <!-- 基本信息 -->
+        <div class="form-section">行程</div>
         <el-form-item label="计划名称">
-          <el-input v-model="editing.name" placeholder="如：南京到上海 每周一" />
+          <el-input v-model="editing.name" placeholder="如：南京到上海 每周一" maxlength="64" show-word-limit />
         </el-form-item>
         <el-form-item label="出发站">
-          <el-input v-model="editing.fromStation" placeholder="如：南京" />
+          <el-autocomplete
+            v-model="editing.fromStation"
+            :fetch-suggestions="searchStations"
+            placeholder="输入站名或拼音首字母，如 南京 / NJ"
+            :trigger-on-focus="false"
+            clearable
+            style="width: 100%"
+          />
         </el-form-item>
         <el-form-item label="到达站">
-          <el-input v-model="editing.toStation" placeholder="如：上海" />
+          <el-autocomplete
+            v-model="editing.toStation"
+            :fetch-suggestions="searchStations"
+            placeholder="输入站名或拼音首字母，如 上海 / SH"
+            :trigger-on-focus="false"
+            clearable
+            style="width: 100%"
+          />
         </el-form-item>
-        <el-form-item label="日期模式">
+
+        <!-- 出行频率 -->
+        <div class="form-section">出行频率</div>
+        <el-form-item label="怎么走">
           <el-radio-group v-model="editing.dateMode">
-            <el-radio value="single">具体日期</el-radio>
-            <el-radio value="recurring">固定周几（不跳节假日）</el-radio>
-            <el-radio value="workweek">工作周（日历推算，自动跳节假日）</el-radio>
+            <el-radio value="single">只走一次</el-radio>
+            <el-radio value="recurring">每周固定周几</el-radio>
+            <el-radio value="workweek">按工作周（自动跳节假日）</el-radio>
           </el-radio-group>
+          <div class="form-hint">
+            {{ editing.dateMode === 'single' ? '一次性购票，指定具体乘车日期。'
+              : editing.dateMode === 'workweek' ? '系统按国务院工作日历推算：自动跳过法定节假日、识别调休补班日，数据未公布的年份按自然周推算。'
+              : '纯按日历周期，逢节假日不跳过（如国庆周照常）。' }}
+          </div>
         </el-form-item>
         <el-form-item v-if="editing.dateMode === 'single'" label="乘车日期">
-          <el-date-picker v-model="editing.travelDate" type="date" value-format="YYYY-MM-DD" />
+          <el-date-picker v-model="editing.travelDate" type="date" value-format="YYYY-MM-DD" placeholder="选择乘车日期" style="width: 100%" />
         </el-form-item>
         <template v-else-if="editing.dateMode === 'workweek'">
-          <el-form-item label="工作周类型">
+          <el-form-item label="每周哪天">
             <el-radio-group v-model="editing.weekEdge">
-              <el-radio value="start">工作周开始（首个工作日）</el-radio>
-              <el-radio value="end">工作周结束（最后一个工作日）</el-radio>
+              <el-radio value="start">工作周第一天</el-radio>
+              <el-radio value="end">工作周最后一天</el-radio>
             </el-radio-group>
+            <div class="form-hint">通常是周一 / 周五；遇节假日自动顺延，遇调休补班日提前。</div>
           </el-form-item>
-          <el-form-item label="提前/延后">
-            <el-input-number v-model="editing.offsetDays" :min="-6" :max="6" />
-            <span style="margin-left: 8px; color: #909399; font-size: 12px">天（负=提前，如 -1 提前一天；正=延后。0=按日历推算日）</span>
-          </el-form-item>
-          <el-form-item label="周期（周）">
+          <el-form-item label="每几周走">
             <el-input-number v-model="editing.weekInterval" :min="1" :max="4" />
+            <span class="form-inline">周一次</span>
           </el-form-item>
-          <el-form-item label="生效日期">
-            <el-date-picker v-model="editing.validFrom" type="date" value-format="YYYY-MM-DD" />
-          </el-form-item>
-          <el-form-item label="结束日期">
-            <el-date-picker v-model="editing.validUntil" type="date" value-format="YYYY-MM-DD" placeholder="留空=长期" />
+          <el-form-item label="日期微调">
+            <el-input-number v-model="editing.offsetDays" :min="-6" :max="6" />
+            <span class="form-inline">天（0=按日历，负=提前，正=延后）</span>
           </el-form-item>
         </template>
         <template v-else>
@@ -545,56 +674,76 @@ onMounted(load);
               <el-option v-for="(n, i) in weekdayNames" :key="i" :label="n" :value="i + 1" />
             </el-select>
           </el-form-item>
-          <el-form-item label="提前/延后">
-            <el-input-number v-model="editing.offsetDays" :min="-6" :max="6" />
-            <span style="margin-left: 8px; color: #909399; font-size: 12px">天（负=提前，正=延后，0=不偏移）</span>
-          </el-form-item>
-          <el-form-item label="周期（周）">
+          <el-form-item label="每几周走">
             <el-input-number v-model="editing.weekInterval" :min="1" :max="4" />
+            <span class="form-inline">周一次</span>
           </el-form-item>
-          <el-form-item label="生效日期">
-            <el-date-picker v-model="editing.validFrom" type="date" value-format="YYYY-MM-DD" />
-          </el-form-item>
-          <el-form-item label="结束日期">
-            <el-date-picker v-model="editing.validUntil" type="date" value-format="YYYY-MM-DD" placeholder="留空=长期" />
+          <el-form-item label="日期微调">
+            <el-input-number v-model="editing.offsetDays" :min="-6" :max="6" />
+            <span class="form-inline">天（0=按日历，负=提前，正=延后）</span>
           </el-form-item>
         </template>
-        <el-form-item label="出发时间范围">
+        <el-form-item v-if="editing.dateMode !== 'single'" label="开始日期">
+          <el-date-picker v-model="editing.validFrom" type="date" value-format="YYYY-MM-DD" placeholder="从哪天开始执行" style="width: 100%" />
+        </el-form-item>
+        <el-form-item v-if="editing.dateMode !== 'single'" label="结束日期">
+          <el-date-picker v-model="editing.validUntil" type="date" value-format="YYYY-MM-DD" placeholder="不填=一直执行" style="width: 100%" />
+        </el-form-item>
+
+        <!-- 车次与座位 -->
+        <div class="form-section">车次与座位</div>
+        <el-form-item label="出发时间段">
           <el-time-picker v-model="editing.timeFrom" format="HH:mm" value-format="HH:mm" placeholder="如 08:00" />
           <span style="margin: 0 8px">至</span>
           <el-time-picker v-model="editing.timeTo" format="HH:mm" value-format="HH:mm" placeholder="如 09:00" />
+          <div class="form-hint">只买这个时间段内发车的车次。</div>
         </el-form-item>
-        <el-form-item label="指定车次">
-          <el-select v-model="editing.trainNumbers" multiple filterable allow-create placeholder="留空=按时间范围自动匹配" style="width: 100%">
-            <el-option label="G1" value="G1" /><el-option label="G3" value="G3" /><el-option label="G5" value="G5" />
+        <el-form-item label="车次">
+          <div style="display: flex; gap: 8px; width: 100%">
+            <el-select
+              v-model="editing.trainNumbers"
+              multiple
+              filterable
+              allow-create
+              placeholder="不填=按时间段自动匹配"
+              style="flex: 1"
+            >
+              <el-option v-for="t in trainOptions" :key="t.code" :label="t.label" :value="t.code" />
+            </el-select>
+            <el-button :loading="trainLoading" @click="searchTrains">查询车次</el-button>
+          </div>
+          <div class="form-hint">点「查询车次」从 12306 拉取真实可购车次（需已登录）；也可直接输入车次号。</div>
+        </el-form-item>
+        <el-form-item label="座位位置">
+          <el-select v-model="editing.seatPositions" multiple placeholder="靠窗 / 过道偏好（可多选）">
+            <el-option v-for="s in seatOptions" :key="s" :label="`${s}（${seatPositionHint[s]}）`" :value="s" />
           </el-select>
         </el-form-item>
-        <el-form-item label="座位偏好" required>
-          <el-select v-model="editing.seatPositions" multiple placeholder="必选：A/F 靠窗、C/D 过道">
-            <el-option v-for="s in seatOptions" :key="s" :label="s + '（' + ({ A: '靠窗', B: '中间', C: '过道', D: '过道', F: '靠窗' } as Record<string, string>)[s] + '）'" :value="s" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="席别" required>
-          <el-select v-model="editing.seatTypes" multiple placeholder="必选：购票时严格按所选席别匹配，售罄不回退">
+        <el-form-item label="席别">
+          <el-select v-model="editing.seatTypes" multiple placeholder="想买哪种席别（可多选）">
             <el-option v-for="st in seatTypeOptions" :key="st.code" :label="st.name" :value="st.code" />
           </el-select>
+          <div class="form-hint">严格按所选席别买，售罄不回退到其他席别（商务座除外，不会自动买商务座）。</div>
         </el-form-item>
-        <el-form-item label="允许无座">
+        <el-form-item label="无座票">
           <el-switch v-model="editing.allowNoSeat" />
-          <span style="margin-left: 10px; color: #909399; font-size: 12px">
-            默认关闭：目标席别售罄时宁可失败告警，也不买无座票。开启后接受无座。
+          <span class="form-inline" style="margin-left: 10px">
+            默认关闭：所选席别卖光就放弃并告警；开启后接受无座票。
           </span>
         </el-form-item>
+
+        <!-- 乘车人 -->
+        <div class="form-section">乘车人</div>
         <el-form-item label="乘车人">
-          <el-select v-model="editing.passengerIds" multiple style="width: 100%">
+          <el-select v-model="editing.passengerIds" multiple placeholder="选择要购票的乘车人" style="width: 100%">
             <el-option v-for="p in passengers" :key="p.id" :label="`${p.name}（${p.passengerType}）`" :value="p.id" />
           </el-select>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="preview">推算日期预览</el-button>
+        <el-button @click="preview">预览购票日期</el-button>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="save">保存</el-button>
+        <el-button type="primary" @click="save">保存计划</el-button>
       </template>
     </el-dialog>
 
@@ -612,6 +761,13 @@ onMounted(load);
           <el-button size="small" text @click="pvToFirst">首个日期</el-button>
         </div>
       </div>
+      <el-alert
+        v-if="pvCalendarPending"
+        class="pv-pending"
+        type="warning"
+        :closable="false"
+        :title="`${pvMonth.getFullYear()} 年的放假安排尚未公布，日历暂按自然周推算。国务院发布后系统会自动更新。`"
+      />
       <div v-if="!previewRows.length" class="pv-empty">该生效区间内没有可推算的购票日期</div>
       <template v-else>
         <div class="pv-grid pv-head">
@@ -656,6 +812,27 @@ onMounted(load);
 </template>
 
 <style scoped>
+/* ---- 新建/编辑计划表单：分区标题与行内提示 ---- */
+.form-section {
+  font-weight: 700;
+  font-size: 13px;
+  color: #303133;
+  margin: 4px 0 12px;
+  padding-left: 8px;
+  border-left: 3px solid #409eff;
+}
+.form-hint {
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.5;
+  margin-top: 4px;
+}
+.form-inline {
+  font-size: 12px;
+  color: #909399;
+  margin-left: 6px;
+}
+
 .pv-toolbar {
   display: flex;
   justify-content: space-between;
@@ -700,6 +877,9 @@ onMounted(load);
   padding: 24px 0;
   text-align: center;
   font-size: 13px;
+}
+.pv-pending {
+  margin-bottom: 10px;
 }
 .pv-grid {
   display: grid;
@@ -808,6 +988,24 @@ onMounted(load);
   color: #909399;
   font-size: 10px;
   margin-top: 2px;
+}
+
+/* ---- 操作栏：主操作 + 「更多」下拉，避免一行挤 5 个按钮 ---- */
+.plan-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+/* 纯 CSS 下拉箭头（项目未引入 @element-plus/icons-vue） */
+.plan-caret {
+  display: inline-block;
+  width: 0;
+  height: 0;
+  margin-left: 3px;
+  border: 4px solid transparent;
+  border-top-color: currentColor;
+  vertical-align: -2px;
 }
 
 /* ---- 计划详情抽屉 ---- */
