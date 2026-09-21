@@ -123,7 +123,7 @@ start_foreground() {
 
   info "Node          : $("$NODE_BIN" -v)  ($NODE_BIN)"
   info "管理台地址    : $BASE_URL"
-  info "默认账号      : admin / admin123（首次登录后请尽快修改）"
+  info "单用户模式    : 无需登录，打开后请在顶栏「12306 账号」里扫码登录 12306"
   info "按 Ctrl+C 停止服务"
   echo
 
@@ -151,7 +151,7 @@ start_daemon() {
   if wait_ready; then
     port_pid >"$PID_FILE" 2>/dev/null || true
     info "启动成功：$BASE_URL"
-    info "默认账号：admin / admin123"
+    info "单用户模式：无需登录，请在顶栏「12306 账号」里扫码登录 12306"
     info "日志：$LOG_FILE"
     info "停止：$0 stop"
     open_browser

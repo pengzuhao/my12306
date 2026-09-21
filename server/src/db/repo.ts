@@ -121,7 +121,7 @@ export const UsersRepo = {
 };
 
 export const RailwayAccountRepo = {
-  get(userId: string): { id: string; username: string | null; status: RailwayAccountStatus; lastLoginAt: string | null; failReason: string | null } | null {
+  get(userId: string): { id: string; username: string | null; status: RailwayAccountStatus; lastLoginAt: string | null; lastCheckAt: string | null; failReason: string | null } | null {
     const row = getDb().prepare('SELECT * FROM railway_accounts WHERE user_id = ?').get(userId) as Record<string, unknown> | undefined;
     if (!row) return null;
     return {
@@ -129,6 +129,7 @@ export const RailwayAccountRepo = {
       username: (row.username as string | null) ?? null,
       status: row.status as RailwayAccountStatus,
       lastLoginAt: (row.last_login_at as string) ?? null,
+      lastCheckAt: (row.last_check_at as string) ?? null,
       failReason: (row.fail_reason as string) ?? null,
     };
   },

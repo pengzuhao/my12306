@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { RailwayAccountRepo, PassengersRepo } from '../db/repo.js';
 import { currentUser } from './auth.routes.js';
 import { Logger } from '../logger.js';
+import { wsHub } from '../ws/hub.js';
 import {
   getSessionState,
   loginInteractive,
@@ -51,9 +52,20 @@ export const sessionRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts
   app.post('/api/session/check', async () => {
     const user = currentUser();
     const ctx = await getContext(user.id).catch(() => null);
-    if (!ctx) return { loggedIn: false, state: getSessionState(user.id) };
+    if (!ctx) {
+      // 浏览器起不来也必须把状态标成失活，否则前端一直显示"已连接"
+      RailwayAccountRepo.updateStatus(user.id, 'invalid', '浏览器未启动');
+      wsHub.broadcastToUser(user.id, { type: 'session', payload: getSessionState(user.id) });
+      return { loggedIn: false, state: getSessionState(user.id) };
+    }
     const ok = await checkLoggedIn(ctx);
-    if (ok) RailwayAccountRepo.touchCheck(user.id);
+    if (ok) {
+      RailwayAccountRepo.touchCheck(user.id);
+    } else {
+      // 关键：检查失败必须落库，否则 DB 里永远是 active，前端一直显示"已连接"
+      RailwayAccountRepo.updateStatus(user.id, 'invalid', '会话已失活，请重新扫码登录');
+      wsHub.broadcastToUser(user.id, { type: 'session', payload: getSessionState(user.id) });
+    }
     return { loggedIn: ok, state: getSessionState(user.id) };
   });
 

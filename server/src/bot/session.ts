@@ -99,7 +99,7 @@ export function getSessionState(userId: string): SessionState {
     status: acc?.status ?? 'none',
     loggedIn: acc?.status === 'active',
     userName: acc?.username ?? null,
-    lastCheckAt: acc?.lastLoginAt ?? null,
+    lastCheckAt: acc?.lastCheckAt ?? null,
     lastLoginAt: acc?.lastLoginAt ?? null,
     failReason: acc?.failReason ?? null,
   };
