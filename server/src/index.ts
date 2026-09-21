@@ -1,7 +1,7 @@
 /**
  * 后端服务入口。
  *
- * - Fastify HTTP API（JWT 鉴权）
+ * - Fastify HTTP API（单用户模式，无登录/鉴权）
  * - WebSocket：日志/会话/任务状态推送 + 验证码透传
  * - 静态托管管理台前端（生产环境）
  * - 启动调度器与保活
@@ -15,12 +15,11 @@ import fastifyWebsocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
 import fs from 'node:fs';
 import path from 'node:path';
-import { HOST, PORT } from './config.js';
+import { HOST, PORT, SYSTEM_USER_ID } from './config.js';
 import { cnTime } from './utils/cn-time.js';
 import { applySchema, seedAdmin } from './db/index.js';
 import { setLogHub, Logger } from './logger.js';
 import { wsHub } from './ws/hub.js';
-import { authRoutes, currentUser } from './routes/auth.routes.js';
 import { planRoutes } from './routes/plan.routes.js';
 import { sessionRoutes } from './routes/session.routes.js';
 import { orderRoutes } from './routes/order.routes.js';
@@ -38,21 +37,11 @@ async function bootstrap(): Promise<void> {
 
   const app = Fastify({ logger: false, bodyLimit: 4 * 1024 * 1024 });
 
-  // WebSocket：/ws?token=<jwt>
+  // WebSocket：/ws（单用户模式无鉴权，连接即归属内置用户）
   await app.register(fastifyWebsocket, { options: { maxPayload: 8 * 1024 * 1024 } });
   app.register(async (instance) => {
-    instance.get('/ws', { websocket: true }, (socket, request) => {
-      const url = new URL(request.url, 'http://localhost');
-      const token = url.searchParams.get('token');
-      let userId: string | null = null;
-      if (token) {
-        const user = currentUser({ headers: { authorization: `Bearer ${token}` } });
-        userId = user?.id ?? null;
-      }
-      if (!userId) {
-        socket.close(4001, '未授权');
-        return;
-      }
+    instance.get('/ws', { websocket: true }, (socket) => {
+      const userId = SYSTEM_USER_ID;
       (socket as unknown as { userId: string }).userId = userId;
       wsHub.add(socket);
       socket.send(JSON.stringify({ type: 'status', payload: { connected: true, time: cnTime() } }));
@@ -61,7 +50,7 @@ async function bootstrap(): Promise<void> {
           const msg = JSON.parse(raw.toString()) as { type: string; payload: unknown };
           // 管理台取消扫码登录
           if (msg.type === 'qr_cancel') {
-            cancelQrLogin(userId as string);
+            cancelQrLogin(userId);
           }
         } catch {
           // 忽略非法消息
@@ -71,7 +60,6 @@ async function bootstrap(): Promise<void> {
   });
 
   // 路由
-  await app.register(authRoutes);
   await app.register(planRoutes);
   await app.register(sessionRoutes);
   await app.register(orderRoutes);
@@ -113,7 +101,6 @@ async function bootstrap(): Promise<void> {
 
   await app.listen({ host: HOST, port: PORT });
   logger.info(`my12306 后端服务已启动: http://${HOST}:${PORT}`);
-  logger.info('默认管理员账号：admin / admin123（请尽快修改）');
 }
 
 void bootstrap().catch((e) => {

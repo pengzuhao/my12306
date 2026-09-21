@@ -1,8 +1,6 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router';
-import { useAuthStore } from '../store/auth';
 
 const routes: RouteRecordRaw[] = [
-  { path: '/login', name: 'login', component: () => import('../views/LoginView.vue') },
   {
     path: '/',
     component: () => import('../views/LayoutView.vue'),
@@ -11,19 +9,13 @@ const routes: RouteRecordRaw[] = [
       { path: 'dashboard', name: 'dashboard', component: () => import('../views/DashboardView.vue') },
       { path: 'orders', name: 'orders', component: () => import('../views/OrdersView.vue') },
       { path: 'plans', name: 'plans', component: () => import('../views/PlansView.vue') },
-      // 「12306 会话」已融合进仪表盘，旧书签自动跳转过去
+      // 「12306 会话」已融合进顶栏，旧书签自动跳转过去
       { path: 'session', redirect: '/dashboard' },
       { path: 'feishu', name: 'feishu', component: () => import('../views/FeishuView.vue') },
-      { path: 'tasks', name: 'tasks', component: () => import('../views/TasksView.vue') },
-      { path: 'users', name: 'users', component: () => import('../views/UsersView.vue') },
+      // 「任务与日志」已合并进购票计划详情，旧书签自动跳转过去
+      { path: 'tasks', redirect: '/plans' },
     ],
   },
 ];
 
 export const router = createRouter({ history: createWebHashHistory(), routes });
-
-router.beforeEach((to) => {
-  const auth = useAuthStore();
-  if (to.name !== 'login' && !auth.token) return { name: 'login' };
-  if (to.name === 'login' && auth.token) return { name: 'dashboard' };
-});

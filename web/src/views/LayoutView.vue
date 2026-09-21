@@ -1,12 +1,16 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue';
+import { onMounted, ref } from 'vue';
 import { useRouter, RouterView } from 'vue-router';
-import { useAuthStore } from '../store/auth';
-import { taskApi, WsClient } from '../api';
+import { WsClient } from '../api';
 import {
   sessionState,
+  sessionLoading,
+  sessionSyncing,
   loadSessionState,
   startLogin,
+  checkNow,
+  syncPassengers,
+  doLogout,
   handleQrCode,
   handleSessionUpdate,
   qrVisible,
@@ -17,19 +21,16 @@ import {
 import { ElMessage, ElNotification } from 'element-plus';
 
 const router = useRouter();
-const auth = useAuthStore();
 
-const taskCount = ref(0);
 const ws = ref<WsClient | null>(null);
 
-const menuItems = computed(() => [
-  { index: '/dashboard', title: '仪表盘' },
+const menuItems = [
+  { index: '/dashboard', title: '车票日历' },
   { index: '/orders', title: '已购车票' },
   { index: '/plans', title: '购票计划' },
   { index: '/feishu', title: '飞书通知' },
-  { index: '/tasks', title: '任务与日志' },
-  ...(auth.user?.role === 'admin' ? [{ index: '/users', title: '用户管理' }] : []),
-]);
+  // 「任务与日志」已合并进购票计划详情，旧书签自动跳转过去
+];
 
 async function loadSession(): Promise<void> {
   await loadSessionState();
@@ -56,32 +57,12 @@ function guideLogin12306(): void {
   });
 }
 
-async function loadTasks(): Promise<void> {
-  try {
-    const list = await taskApi.list();
-    taskCount.value = (list as Array<{ status: string }>).filter(
-      (t) => t.status === 'queried' || t.status === 'running' || t.status === 'pending',
-    ).length;
-  } catch {
-    // ignore
-  }
-}
-
-function logout(): void {
-  auth.logout();
-  ws.value?.close();
-  router.push({ name: 'login' });
-}
-
 onMounted(async () => {
-  await auth.loadMe();
   await loadSession();
-  await loadTasks();
-  ws.value = new WsClient(auth.token);
+  ws.value = new WsClient();
   ws.value.connect({
     onSession: handleSessionUpdate,
     onQrCode: handleQrCode,
-    onTask: () => loadTasks(),
   });
   ElMessage?.success?.('已连接实时通道');
 });
@@ -91,13 +72,20 @@ onMounted(async () => {
   <el-container class="app-layout">
     <el-header class="app-header">
       <div class="logo">🚄 12306 自动购票管理台</div>
-      <div style="display: flex; align-items: center; gap: 16px">
-        <el-tag :type="sessionState.loggedIn ? 'success' : 'danger'" effect="dark">
-          12306 会话：{{ sessionState.loggedIn ? '已登录' : '未登录' }}
+      <!-- 12306 账号状态与操作（单用户模式：无系统登录，只需扫码登录 12306） -->
+      <div class="account-box">
+        <el-tag :type="sessionState.loggedIn ? 'success' : 'danger'" effect="dark" size="small">
+          12306 账号：{{ sessionState.loggedIn ? '已连接' : '未连接' }}
         </el-tag>
-        <el-tag type="info" effect="dark">待办任务 {{ taskCount }}</el-tag>
-        <span>{{ auth.user?.displayName }}</span>
-        <el-button link style="color: #fff" @click="logout">退出</el-button>
+        <span v-if="sessionState.userName" class="account-name">{{ sessionState.userName }}</span>
+        <el-button v-if="!sessionState.loggedIn" type="primary" size="small" :loading="sessionLoading" @click="startLogin">
+          扫码登录
+        </el-button>
+        <template v-else>
+          <el-button size="small" :loading="sessionLoading" @click="checkNow">检查</el-button>
+          <el-button size="small" :loading="sessionSyncing" @click="syncPassengers">同步联系人</el-button>
+          <el-button size="small" type="danger" @click="doLogout">退出</el-button>
+        </template>
       </div>
     </el-header>
     <el-container>
@@ -137,3 +125,14 @@ onMounted(async () => {
   </el-dialog>
 </template>
 
+<style scoped>
+.account-box {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.account-name {
+  font-size: 13px;
+  color: #c0c4cc;
+}
+</style>

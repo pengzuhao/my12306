@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { planApi, passengerApi, calendarApi, type PlanForm, type HolidayDay } from '../api';
+import {
+  planApi,
+  passengerApi,
+  calendarApi,
+  type PlanForm,
+  type HolidayDay,
+  type PlanDateEntry,
+  type TaskSnapshot,
+} from '../api';
 
 interface Passenger {
   id: string;
@@ -72,18 +80,65 @@ const pvCells = computed<(PvCell | null)[]>(() => {
   return cells;
 });
 
-function pvShift(delta: number): void {
-  pvMonth.value = new Date(pvMonth.value.getFullYear(), pvMonth.value.getMonth() + delta, 1);
+/**
+ * 翻月（带范围控制 + 节假日加载前提）。
+ *
+ * - 范围：只能翻到推算结果覆盖的月份（第一个到最后一个推算日期之间），
+ *   超出范围的月份没有任何推算数据，翻了也没意义。
+ * - 前提：目标月份所在年的节假日数据必须加载成功。接口失败时阻止翻页
+ *   并提示用户（而不是静默渲染一个无节假日标记的日历，误导推算）。
+ */
+async function pvShift(delta: number): Promise<void> {
+  if (!previewRows.value.length) return;
+  const first = previewRows.value[0].travelDate;
+  const last = previewRows.value[previewRows.value.length - 1].travelDate;
+  const target = new Date(pvMonth.value.getFullYear(), pvMonth.value.getMonth() + delta, 1);
+  const targetEnd = new Date(target.getFullYear(), target.getMonth() + 1, 0); // 目标月最后一天
+  // 越界：目标月整体早于首个推算日期 或 晚于末个推算日期
+  if (targetEnd < new Date(first) || target > new Date(last)) {
+    ElMessage.info('已到推算日期范围边界');
+    return;
+  }
+  // 节假日加载前提：目标年份必须先加载成功才允许翻过去
+  const y = target.getFullYear();
+  if (!pvHolidaysByYear.has(y)) {
+    try {
+      const yearDays = await calendarApi.holidaysOfYear(y);
+      pvHolidaysByYear.set(y, yearDays);
+    } catch {
+      ElMessage.error(`${y} 年节假日数据加载失败，暂无法查看该月日历`);
+      return;
+    }
+  }
+  pvMonth.value = target;
 }
 
-// ---- 预览日历的节假日标记 ----
+// ---- 预览日历的节假日标记（按自然年缓存，切月份零延迟）----
+/** 当前展示月份的节假日数据（从年度缓存里切片得到） */
 const pvHolidays = ref<HolidayDay[]>([]);
+/** 按自然年缓存：year -> 全年节假日数据。只有首次访问某年时才调接口 */
+const pvHolidaysByYear = new Map<number, HolidayDay[]>();
 
 async function reloadPvHolidays(): Promise<void> {
+  const y = pvMonth.value.getFullYear();
+  const m = pvMonth.value.getMonth() + 1;
+  const prefix = `${y}-${String(m).padStart(2, '0')}-`;
+  // 年度缓存命中：同步切片返回，无网络延迟
+  const cached = pvHolidaysByYear.get(y);
+  if (cached) {
+    pvHolidays.value = cached.filter((h) => h.date.startsWith(prefix));
+    return;
+  }
+  // 首次访问该年：一次接口拿全年数据，之后该年内切月份不再请求
+  // 失败时清空该年标记并提示——节假日数据是工作周推算的前提，不能静默吞掉
   try {
-    pvHolidays.value = await calendarApi.holidays(pvMonth.value.getFullYear(), pvMonth.value.getMonth() + 1);
+    const yearDays = await calendarApi.holidaysOfYear(y);
+    pvHolidaysByYear.set(y, yearDays);
+    pvHolidays.value = yearDays.filter((h) => h.date.startsWith(prefix));
   } catch {
+    pvHolidaysByYear.delete(y);
     pvHolidays.value = [];
+    ElMessage.error(`${y} 年节假日数据加载失败，日历标记暂不可用`);
   }
 }
 
@@ -93,11 +148,28 @@ function pvHolidayOf(dateStr: string): HolidayDay | undefined {
 
 watch(pvMonth, () => void reloadPvHolidays());
 
-/** 跳到第一个推算日期所在的月份 */
-function pvToFirst(): void {
+/** 跳到第一个推算日期所在的月份（先确保该年节假日已加载） */
+async function pvToFirst(): Promise<void> {
   const first = previewRows.value[0];
   if (!first) return;
-  pvMonth.value = new Date(Number(first.travelDate.slice(0, 4)), Number(first.travelDate.slice(5, 7)) - 1, 1);
+  const y = Number(first.travelDate.slice(0, 4));
+  if (!pvHolidaysByYear.has(y)) {
+    try {
+      pvHolidaysByYear.set(y, await calendarApi.holidaysOfYear(y));
+    } catch {
+      ElMessage.error(`${y} 年节假日数据加载失败，日历标记暂不可用`);
+    }
+  }
+  pvMonth.value = new Date(y, Number(first.travelDate.slice(5, 7)) - 1, 1);
+}
+
+/** 席别代码 → 中文名（计划列表展示用） */
+function seatTypeName(codes?: string[] | null): string {
+  if (!codes || !codes.length) return '二等座';
+  const map: Record<string, string> = {
+    ZE: '二等座', ZY: '一等座', TZ: '特等座', YW: '硬卧', RW: '软卧', GR: '高级软卧', RZ: '软座', YZ: '硬座',
+  };
+  return codes.map((c) => map[c] ?? c).join('/');
 }
 
 function emptyForm(): PlanForm {
@@ -117,6 +189,7 @@ function emptyForm(): PlanForm {
     timeTo: '09:00',
     trainNumbers: null,
     seatPositions: ['A', 'F'],
+    seatTypes: ['ZE'],
     allowNoSeat: false,
     passengerIds: [],
   };
@@ -124,6 +197,17 @@ function emptyForm(): PlanForm {
 
 const weekdayNames = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 const seatOptions = ['A', 'B', 'C', 'D', 'F'];
+/** 席别选项（不含商务座 SWZ：用户明确要求不买商务座） */
+const seatTypeOptions = [
+  { code: 'ZE', name: '二等座' },
+  { code: 'ZY', name: '一等座' },
+  { code: 'TZ', name: '特等座' },
+  { code: 'YW', name: '硬卧' },
+  { code: 'RW', name: '软卧' },
+  { code: 'GR', name: '高级软卧' },
+  { code: 'RZ', name: '软座' },
+  { code: 'YZ', name: '硬座' },
+];
 
 async function load(): Promise<void> {
   plans.value = (await planApi.list()) as Plan[];
@@ -151,7 +235,11 @@ async function save(): Promise<void> {
     return;
   }
   if (!editing.seatPositions || !editing.seatPositions.length) {
-    ElMessage.warning('请选择座位席别（必填，按偏好席别严格匹配购票）');
+    ElMessage.warning('请选择座位偏好（必填：A/F 靠窗、C/D 过道）');
+    return;
+  }
+  if (!editing.seatTypes || !editing.seatTypes.length) {
+    ElMessage.warning('请选择席别（必填：购票时按所选席别严格匹配）');
     return;
   }
   try {
@@ -177,12 +265,95 @@ async function confirmDelete(id: string): Promise<void> {
 async function preview(): Promise<void> {
   try {
     previewRows.value = (await planApi.previewDates(editing)) as PreviewEntry[];
-    pvToFirst();
+    await pvToFirst();
     await reloadPvHolidays();
     previewVisible.value = true;
   } catch (e) {
-    ElMessage.error('推算失败：' + String(e));
+    const msg = (e as { response?: { data?: { error?: string } } }).response?.data?.error ?? String(e);
+    ElMessage.error('推算失败：' + msg);
   }
+}
+
+// ---- 计划详情抽屉：执行历史 + 当前动作 ----
+const detailVisible = ref(false);
+const detailPlan = ref<Plan | null>(null);
+const detailRows = ref<PlanDateEntry[]>([]);
+/** 计划详情数据是否正在加载（也用于刷新按钮的 loading 态） */
+const detailLoading = ref(false);
+
+/** 任务状态 → 中文显示名 */
+const taskStatusName: Record<string, string> = {
+  pending: '待查起售时间',
+  queried: '待起售',
+  queued: '排队中',
+  running: '正在购票',
+  success: '已购票',
+  failed: '失败',
+  skipped: '已跳过',
+  cancelled: '已取消',
+};
+const taskStatusType: Record<string, string> = {
+  pending: 'info',
+  queried: 'info',
+  queued: 'warning',
+  running: 'warning',
+  success: 'success',
+  failed: 'danger',
+  skipped: 'info',
+  cancelled: 'info',
+};
+
+/** 起售时间 → 北京时间可读串（接口返回 ISO，可能是 +08:00 或 Z） */
+function fmtSaleAt(iso: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const cn = new Date(d.getTime() + (8 * 60 + d.getTimezoneOffset()) * 60_000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${cn.getFullYear()}-${p(cn.getMonth() + 1)}-${p(cn.getDate())} ${p(cn.getHours())}:${p(cn.getMinutes())}`;
+}
+
+/** 当前正在执行的任务（running / queried 中最近一条） */
+const activeTask = computed<TaskSnapshot | null>(() => {
+  const running = detailRows.value.map((r) => r.task).filter(Boolean) as TaskSnapshot[];
+  return (
+    running.find((t) => t.status === 'running') ??
+    running.find((t) => t.status === 'queried') ??
+    running.find((t) => t.status === 'queued') ??
+    null
+  );
+});
+
+/** 执行历史里有结果的条数（成功 + 失败） */
+const doneCount = computed(
+  () => detailRows.value.filter((r) => r.task?.status === 'success' || r.task?.status === 'failed').length,
+);
+
+async function openDetail(p: Plan): Promise<void> {
+  detailPlan.value = p;
+  detailVisible.value = true;
+  await loadDetail(p.id);
+}
+
+/** 手动刷新当前打开的详情 */
+function refreshDetail(): void {
+  if (detailPlan.value) void loadDetail(detailPlan.value.id);
+}
+
+async function loadDetail(id: string): Promise<void> {
+  detailLoading.value = true;
+  try {
+    detailRows.value = await planApi.dates(id);
+  } catch (e) {
+    ElMessage.error('加载执行历史失败：' + String(e));
+    detailRows.value = [];
+  } finally {
+    detailLoading.value = false;
+  }
+}
+
+function closeDetail(): void {
+  detailVisible.value = false;
 }
 
 onMounted(load);
@@ -198,7 +369,11 @@ onMounted(load);
         </div>
       </template>
       <el-table :data="plans" border>
-        <el-table-column prop="name" label="名称" min-width="160" />
+        <el-table-column label="名称" min-width="160">
+          <template #default="{ row }">
+            <el-link type="primary" @click="openDetail(row)">{{ row.name }}</el-link>
+          </template>
+        </el-table-column>
         <el-table-column label="区间" min-width="120">
           <template #default="{ row }">{{ row.fromStation }} → {{ row.toStation }}</template>
         </el-table-column>
@@ -225,9 +400,10 @@ onMounted(load);
             <div class="mono">{{ row.trainNumbers ? row.trainNumbers.join(', ') : '自动匹配' }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="座位" width="110">
+        <el-table-column label="座位/席别" width="130">
           <template #default="{ row }">
             <div>{{ row.seatPositions ? row.seatPositions.join('/') : '不指定' }}</div>
+            <div style="font-size: 12px; color: #909399">{{ seatTypeName(row.seatTypes) }}</div>
             <el-tag v-if="row.allowNoSeat" size="small" type="warning" style="margin-top: 2px">允许无座</el-tag>
           </template>
         </el-table-column>
@@ -238,8 +414,9 @@ onMounted(load);
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="220">
+        <el-table-column label="操作" width="240">
           <template #default="{ row }">
+            <el-button size="small" @click="openDetail(row)">详情</el-button>
             <el-button size="small" @click="openEdit(row)">编辑</el-button>
             <el-button v-if="row.status !== 'paused'" size="small" @click="setStatus(row.id, 'paused')">暂停</el-button>
             <el-button v-if="row.status === 'paused'" size="small" type="success" @click="setStatus(row.id, 'active')">恢复</el-button>
@@ -248,6 +425,77 @@ onMounted(load);
         </el-table-column>
       </el-table>
     </el-card>
+
+    <!-- 计划详情：执行历史 + 当前动作 -->
+    <el-drawer
+      v-model="detailVisible"
+      :title="detailPlan ? `计划详情：${detailPlan.name}` : '计划详情'"
+      direction="rtl"
+      size="560px"
+      :before-close="closeDetail"
+    >
+      <template v-if="detailPlan">
+        <!-- 当前动作 -->
+        <el-card v-if="activeTask" class="page-card detail-active" shadow="never">
+          <div class="da-label">当前进行</div>
+          <div class="da-row">
+            <el-tag :type="(taskStatusType[activeTask.status] ?? 'info') as 'primary' | 'warning' | 'success' | 'danger' | 'info'" effect="dark" size="large">
+              {{ taskStatusName[activeTask.status] ?? activeTask.status }}
+            </el-tag>
+            <span class="da-date">{{ activeTask.travelDate }} {{ activeTask.trainNumber ? `· ${activeTask.trainNumber}` : '· 自动匹配车次' }}</span>
+          </div>
+          <div class="da-meta">
+            <span v-if="activeTask.status === 'queried' && activeTask.saleAt">起售时间 {{ fmtSaleAt(activeTask.saleAt) }} 到点自动购票</span>
+            <span v-else-if="activeTask.status === 'running'">已进入购票流程，请稍候…</span>
+            <span v-else-if="activeTask.status === 'queued'">已排队，即将开始</span>
+          </div>
+        </el-card>
+        <el-card v-else class="page-card detail-active" shadow="never">
+          <div class="da-label">当前进行</div>
+          <div class="da-meta" style="margin: 6px 0">暂无正在执行的任务——下一班车票起售前会自动生成任务。</div>
+        </el-card>
+
+        <!-- 执行历史 -->
+        <div class="detail-sec-title">
+          执行历史 <span class="detail-count">共 {{ detailRows.length }} 个购票日期，已完成 {{ doneCount }}</span>
+          <el-button class="detail-refresh" size="small" :loading="detailLoading" @click="refreshDetail">刷新</el-button>
+        </div>
+        <el-table v-loading="detailLoading" :data="detailRows" border size="small" max-height="520">
+          <el-table-column label="乘车日期" prop="travelDate" width="110" />
+          <el-table-column label="起售时间" width="150">
+            <template #default="{ row }">
+              <div class="mono" style="font-size: 12px">
+                {{ fmtSaleAt(row.task?.saleAt ?? null) || row.estimatedSaleDate + ' 08:00' }}
+              </div>
+              <div v-if="!row.task?.saleAt" style="font-size: 11px; color: #c0c4cc">推算，以实际为准</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="任务状态" width="120">
+            <template #default="{ row }">
+              <el-tag
+                v-if="row.task"
+                :type="(taskStatusType[row.task.status] ?? 'info') as 'primary' | 'warning' | 'success' | 'danger' | 'info'"
+                size="small"
+              >
+                {{ taskStatusName[row.task.status] ?? row.task.status }}
+              </el-tag>
+              <span v-else style="color: #c0c4cc; font-size: 12px">待生成</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="结果" min-width="180">
+            <template #default="{ row }">
+              <div v-if="row.task?.result" class="mono" style="color: #67c23a">
+                {{ row.task.result.trainCode }} · {{ row.task.result.seatInfo }} · 订单 {{ row.task.result.orderNo ?? '-' }}
+              </div>
+              <div v-else-if="row.task?.error" class="mono" style="color: #f56c6c; font-size: 12px">{{ row.task.error }}</div>
+              <div v-else-if="row.postponed" style="color: #e6a23c; font-size: 12px">节假日顺延（原始 {{ row.originalDate }}）</div>
+              <div v-else style="color: #c0c4cc; font-size: 12px">—</div>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div class="detail-tip">点击右上方「刷新」手动更新执行历史；关闭本页面前任务会一直按计划执行。</div>
+      </template>
+    </el-drawer>
 
     <el-dialog v-model="dialogVisible" :title="editing.id ? '编辑计划' : '新建计划'" width="640px">
       <el-form label-width="110px">
@@ -326,6 +574,11 @@ onMounted(load);
             <el-option v-for="s in seatOptions" :key="s" :label="s + '（' + ({ A: '靠窗', B: '中间', C: '过道', D: '过道', F: '靠窗' } as Record<string, string>)[s] + '）'" :value="s" />
           </el-select>
         </el-form-item>
+        <el-form-item label="席别" required>
+          <el-select v-model="editing.seatTypes" multiple placeholder="必选：购票时严格按所选席别匹配，售罄不回退">
+            <el-option v-for="st in seatTypeOptions" :key="st.code" :label="st.name" :value="st.code" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="允许无座">
           <el-switch v-model="editing.allowNoSeat" />
           <span style="margin-left: 10px; color: #909399; font-size: 12px">
@@ -376,12 +629,13 @@ onMounted(load);
                 'pv-rest': !pvHolidayOf(cell.date)?.isWorkday && !pvHolidayOf(cell.date)?.holiday,
               }"
             >
-              <div class="pv-day">
+                <div class="pv-day">
                 {{ cell.day
                 }}<span v-if="pvHolidayOf(cell.date)?.holiday && !pvHolidayOf(cell.date)?.isWorkday" class="pv-hol-tag">{{
                   pvHolidayOf(cell.date)?.holiday
                 }}</span>
-                <span v-else-if="pvHolidayOf(cell.date) && pvHolidayOf(cell.date)?.isWorkday" class="pv-ban-tag">补班</span>
+                <span v-else-if="pvHolidayOf(cell.date)?.holiday && pvHolidayOf(cell.date)?.isWorkday" class="pv-ban-tag">补班</span>
+                <span v-else-if="!pvHolidayOf(cell.date)?.holiday && pvHolidayOf(cell.date)?.isWorkday" class="pv-work-tag">班</span>
                 <span v-else-if="cell.entry" class="pv-wk"> 周{{ WEEK_LABELS[cell.entry.weekday] }}</span>
               </div>
               <div v-if="cell.entry" class="pv-entry" :title="cell.entry.note || (cell.entry.originalDate !== cell.entry.travelDate ? `原始推算 ${cell.entry.originalDate}` : '')">
@@ -540,9 +794,68 @@ onMounted(load);
 .pv-rest .pv-day {
   color: #c0c4cc;
 }
+/* 普通工作日（蓝色「班」角标，不加背景，避免与乘车日/顺延日的底色冲突） */
+.pv-work-tag {
+  margin-left: 3px;
+  font-size: 9px;
+  font-weight: 400;
+  color: #409eff;
+  background: #ecf5ff;
+  border-radius: 3px;
+  padding: 0 3px;
+}
 .pv-sale {
   color: #909399;
   font-size: 10px;
   margin-top: 2px;
+}
+
+/* ---- 计划详情抽屉 ---- */
+.detail-active {
+  margin-bottom: 14px;
+}
+.detail-active :deep(.el-card__body) {
+  padding: 12px 14px;
+}
+.da-label {
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 6px;
+}
+.da-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.da-date {
+  font-weight: 600;
+  font-size: 14px;
+  color: #303133;
+}
+.da-meta {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #909399;
+}
+.detail-sec-title {
+  display: flex;
+  align-items: center;
+  font-weight: 700;
+  font-size: 14px;
+  margin: 4px 0 10px;
+}
+.detail-refresh {
+  margin-left: auto;
+}
+.detail-count {
+  font-weight: 400;
+  font-size: 12px;
+  color: #909399;
+  margin-left: 6px;
+}
+.detail-tip {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #c0c4cc;
 }
 </style>

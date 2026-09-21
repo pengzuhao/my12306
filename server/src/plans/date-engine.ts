@@ -78,7 +78,15 @@ export async function computeDates(input: DateEngineInput, todayStr?: string, no
   const now = nowStr ?? new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Shanghai', hour12: false }).slice(0, 5);
   const end = input.validUntil || addDays(today, 180);
   const offset = Math.round(input.offsetDays ?? 0);
-  await ensureYears(yearsBetween(today, end));
+  // 节假日数据是推算的前提：workweek 模式完全依赖它判定工作日。
+  // 拉取失败的年份必须让调用方知道（返回成功集合，缺失则报错），否则会按
+  // 自然周静默推算出错误日期（如国庆周没数据 → 把放假当天当工作日）。
+  const needed = yearsBetween(today, end);
+  const ready = await ensureYears(needed);
+  const missingYears = needed.filter((y) => !ready.has(y));
+  if (missingYears.length) {
+    throw new Error(`节假日数据未就绪：${missingYears.join('、')} 年的放假安排拉取失败，暂无法推算工作日历`);
+  }
 
   if (input.dateMode === 'single') {
     const d = input.travelDate;
@@ -144,24 +152,44 @@ export async function computeDates(input: DateEngineInput, todayStr?: string, no
       if (picked) {
         // 应用提前/延后偏移（负=提前，正=延后）
         const shifted = offset ? addDays(picked, offset) : picked;
-        // 常态目标日：周初=周期起点，周末=起点+4。实际取到的首个/最后一个工作日若与常态不同，
-        // 说明本周被节假日挤占（如国庆周），标记为顺延。
-        const naive = edge === 'start' ? weekStart : addDays(weekStart, 4);
-        const postponed = picked !== naive;
+        // 常态目标日：不看节假日数据时，本周本该的首个/最后一个工作日（按自然周
+        // 周一至周五）。注意不能直接拿 weekStart 当常态日——用户锚点 validFrom
+        // 不一定是周一（如本例锚点是周六 9.19），那样首个工作日必然晚于锚点，
+        // 每个普通周都会被误判成"顺延"。
+        let naive: string | null = null;
+        if (edge === 'start') {
+          for (let d = weekStart; d <= weekEnd; d = addDays(d, 1)) {
+            const wd = weekdayOf(d);
+            if (wd >= 1 && wd <= 5) { naive = d; break; }
+          }
+        } else {
+          for (let d = weekEnd; d >= weekStart; d = addDays(d, -1)) {
+            const wd = weekdayOf(d);
+            if (wd >= 1 && wd <= 5) { naive = d; break; }
+          }
+        }
+        // 只有实际取到的工作日晚于常态目标日，才是真正的节假日顺延；
+        // 早于常态目标日（如周日补班成为本周首个工作日）属"提前"，不算顺延。
+        const postponed = naive !== null && picked > naive;
         // 今天这班车是否已经开走：推算日=今天 且 当前时刻已晚于出发时间窗
         const missedToday = shifted === today && departDeadline !== null && now >= departDeadline;
         if (!missedToday && shifted >= today && shifted >= input.validFrom && shifted <= end) {
           const wd = weekdayOf(shifted);
           const parts: string[] = [];
-          if (postponed) {
-            const hol = holidayName(naive);
-            parts.push(`节假日顺延：${naive}（${hol ?? '非工作日'}）→ ${shifted}`);
+          if (naive) {
+            if (postponed) {
+              const hol = holidayName(naive);
+              parts.push(`节假日顺延：${naive}（${hol ?? '非工作日'}）→ ${shifted}`);
+            } else if (picked < naive && !isWorkday(naive)) {
+              // 常态工作日因放假/调休前移（如本周最后工作日因假期提前），补一条说明
+              parts.push(`节假日提前：${naive} → ${shifted}`);
+            }
           }
           if (wd >= 6 && isWorkday(shifted)) parts.push(`调休补班：本周${edge === 'start' ? '首个' : '最后一个'}工作日为 ${shifted}（周${WD_NAMES[wd - 1]}）`);
           if (offset) parts.push(offset < 0 ? `提前 ${-offset} 天：${picked} → ${shifted}` : `延后 ${offset} 天：${picked} → ${shifted}`);
           entries.push({
             travelDate: shifted,
-            originalDate: naive,
+            originalDate: naive ?? picked,
             weekday: wd,
             postponed,
             isWorkday: isWorkday(shifted),

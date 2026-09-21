@@ -26,8 +26,7 @@ const cache = new Map<string, CacheEntry>();
 export const orderRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, done) => {
   /** 查询已购车票（已支付 + 待支付） */
   app.get('/api/orders', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+    const user = currentUser();
     const acc = RailwayAccountRepo.get(user.id);
     if (!acc || acc.status !== 'active') {
       return reply.code(400).send({ error: '12306 未登录，请先在「12306 会话」页扫码登录' });

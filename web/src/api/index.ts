@@ -5,42 +5,39 @@ export const http = axios.create({
   timeout: 30000,
 });
 
-http.interceptors.request.use((config) => {
-  const token = localStorage.getItem('my12306_token');
-  if (token) config.headers.Authorization = `Bearer ${token}`;
-  return config;
-});
-
-http.interceptors.response.use(
-  (res) => res,
-  (err) => {
-    if (err.response?.status === 401) {
-      localStorage.removeItem('my12306_token');
-      if (location.hash !== '#/login') location.hash = '#/login';
-    }
-    return Promise.reject(err);
-  },
-);
-
-// ---- 认证 ----
-export const authApi = {
-  login: (username: string, password: string) =>
-    http.post('/auth/login', { username, password }).then((r) => r.data),
-  me: () => http.get('/auth/me').then((r) => r.data),
-  changePassword: (oldPassword: string, newPassword: string) =>
-    http.post('/auth/change-password', { oldPassword, newPassword }).then((r) => r.data),
-  listUsers: () => http.get('/users').then((r) => r.data),
-  createUser: (data: { username: string; password: string; role: string; displayName?: string }) =>
-    http.post('/users', data).then((r) => r.data),
-  deleteUser: (id: string) => http.delete(`/users/${id}`).then((r) => r.data),
-};
-
 // ---- 乘车人 ----
 export const passengerApi = {
   list: () => http.get('/passengers').then((r) => r.data),
   save: (data: Record<string, unknown>) => http.post('/passengers', data).then((r) => r.data),
   remove: (id: string) => http.delete(`/passengers/${id}`).then((r) => r.data),
 };
+
+// ---- 计划详情：推算日期 + 关联任务执行历史 ----
+export interface TaskSnapshot {
+  id: string;
+  travelDate: string;
+  trainNumber: string | null;
+  /** 起售时刻（ISO） */
+  saleAt: string | null;
+  status: string;
+  attempts: number;
+  error: string | null;
+  result: { trainCode?: string; seatInfo?: string; orderNo?: string } | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface PlanDateEntry {
+  travelDate: string;
+  originalDate: string;
+  weekday: number;
+  postponed: boolean;
+  isWorkday: boolean;
+  note?: string;
+  estimatedSaleDate: string;
+  /** 关联的购票任务（可能还没生成） */
+  task: TaskSnapshot | null;
+}
 
 // ---- 计划 ----
 export interface PlanForm {
@@ -60,6 +57,8 @@ export interface PlanForm {
   timeTo: string | null;
   trainNumbers: string[] | null;
   seatPositions: string[] | null;
+  /** 席别（必选多选）：订票时严格按所选席别匹配，不回退未选席别 */
+  seatTypes: string[];
   /** 是否允许购买无座票（默认 false：不买站票，除非明确勾选） */
   allowNoSeat: boolean;
   passengerIds: string[];
@@ -71,7 +70,7 @@ export const planApi = {
   setStatus: (id: string, status: 'active' | 'paused' | 'deleted') =>
     http.post(`/plans/${id}/status`, { status }).then((r) => r.data),
   previewDates: (data: PlanForm) => http.post('/plans/preview-dates', data).then((r) => r.data),
-  dates: (id: string) => http.get(`/plans/${id}/dates`).then((r) => r.data),
+  dates: (id: string) => http.get(`/plans/${id}/dates`).then((r) => r.data as PlanDateEntry[]),
   stations: (keyword: string) => http.get('/stations', { params: { keyword } }).then((r) => r.data),
 };
 
@@ -93,8 +92,12 @@ export interface HolidayDay {
 }
 
 export const calendarApi = {
+  /** 指定年月，返回该月每天的节假日信息 */
   holidays: (year: number, month: number) =>
     http.get('/calendar/holidays', { params: { year, month } }).then((r) => r.data as HolidayDay[]),
+  /** 指定自然年，返回全年 12 个月的节假日信息（供前端按年缓存，切月份时零延迟） */
+  holidaysOfYear: (year: number) =>
+    http.get('/calendar/holidays', { params: { year } }).then((r) => r.data as HolidayDay[]),
 };
 
 // ---- 飞书 ----
@@ -151,9 +154,9 @@ export class WsClient {
   private ws: WebSocket | null = null;
   private url: string;
 
-  constructor(token: string) {
+  constructor() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    this.url = `${proto}//${location.host}/ws?token=${token}`;
+    this.url = `${proto}//${location.host}/ws`;
   }
 
   connect(handlers: {

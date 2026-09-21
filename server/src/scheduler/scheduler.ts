@@ -19,7 +19,7 @@ import { PlansRepo, PlanDatesRepo, TasksRepo, PassengersRepo, RailwayAccountRepo
 import { computeDates } from '../plans/date-engine.js';
 import { Logger } from '../logger.js';
 import { wsHub } from '../ws/hub.js';
-import { today, addDays } from '../calendar/holidays.js';
+import { today, addDays, isDateReady } from '../calendar/holidays.js';
 import { getContext, getSessionState } from '../bot/session.js';
 import { purchaseTicket } from '../bot/order.js';
 import { findBlockingUnpaid } from '../bot/orders.js';
@@ -74,6 +74,49 @@ function withUserLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
   });
   userLocks.set(userId, next);
   return next as Promise<T>;
+}
+
+/**
+ * 过期判断（用户要求：发车时间已过的任务应跳过，而不是执行后失败）。
+ *
+ * 乘车日期 < 今天 → 一定过期。
+ * 乘车日期 == 今天 → 看发车时间：
+ *   - 计划填了 timeFrom（如 08:00）：当前时间已过发车时间即过期
+ *   - 计划没填时间：起售时刻 saleAt 已过去 2 小时即过期
+ *     （起售通常在发车前 15 天的 8 点；过了发车点还去查，查票页该车次已不在可售列表）
+ */
+function isExpired(task: Task, plan: Plan | null | undefined): boolean {
+  const t = task.travelDate;
+  const todayStr = today();
+  if (t < todayStr) return true;
+  if (t > todayStr) return false;
+  // 同一天：判断是否已发车
+  const depTime = plan?.timeFrom ?? null;
+  if (depTime) {
+    const nowHm = nowHmCn();
+    return nowHm > depTime;
+  }
+  // 没填发车时间：起售时刻过去 2 小时兜底
+  if (task.saleAt) {
+    const saleAtMs = Date.parse(task.saleAt);
+    if (!Number.isNaN(saleAtMs)) return Date.now() - saleAtMs > 2 * 60 * 60 * 1000;
+  }
+  return false;
+}
+
+/** 过期原因（写入 task.error，详情页展示给用户看） */
+function expiredReason(task: Task, plan: Plan | null | undefined): string {
+  const t = task.travelDate;
+  if (t < today()) return '乘车日期已过，跳过执行';
+  if (plan?.timeFrom) return `今日 ${plan.timeFrom} 的列车已发车，跳过执行`;
+  return '列车已发车，跳过执行';
+}
+
+/** 当前北京时间 HH:mm（用于同日发车时间比较） */
+function nowHmCn(): string {
+  const d = new Date();
+  const cn = new Date(d.getTime() + (8 * 60 + d.getTimezoneOffset()) * 60_000);
+  return `${String(cn.getHours()).padStart(2, '0')}:${String(cn.getMinutes()).padStart(2, '0')}`;
 }
 
 /** 计划扫描：生成未来任务 */
@@ -249,6 +292,7 @@ async function purchaseTicketWithRetry(task: Task, plan: Plan, passengers: Passe
     timeFrom: plan.timeFrom,
     timeTo: plan.timeTo,
     seatPositions: plan.seatPositions,
+    seatTypes: plan.seatTypes,
     allowNoSeat: plan.allowNoSeat,
     passengers,
   };
@@ -271,15 +315,17 @@ async function runTask(task: Task): Promise<void> {
   runningLocks.add(task.id);
   const plan = PlansRepo.get(task.planId);
   try {
-    // 过期计划：乘车日期已过（车已开），再下单毫无意义，直接作废不执行
-    if (task.travelDate < today()) {
+    // 过期判断：乘车日期已过，或同一天但列车已发车（发车时间取计划时间范围下限；
+    // 计划没填时间则按起售时刻已过去 2 小时兜底——车早开了，下单毫无意义）。
+    if (isExpired(task, plan)) {
+      const reason = expiredReason(task, plan);
       TasksRepo.update(task.id, {
-        status: 'cancelled',
-        error: '乘车日期已过，视为过期计划，未执行',
+        status: 'skipped',
+        error: reason,
         finishedAt: new Date().toISOString(),
       });
       wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
-      logger.info('任务已过期，跳过执行', { taskId: task.id, travelDate: task.travelDate });
+      logger.info('任务已过期，跳过执行', { taskId: task.id, travelDate: task.travelDate, reason });
       return;
     }
     TasksRepo.update(task.id, { status: 'running', startedAt: new Date().toISOString(), attempts: task.attempts + 1 });
@@ -290,6 +336,22 @@ async function runTask(task: Task): Promise<void> {
       throw new Error('12306 会话不可用，请重新登录');
     }
     if (!plan) throw new Error('计划不存在');
+
+    // 执行前提：任务涉及的年份节假日数据必须已确认。工作周模式完全依赖它
+    // 推算工作日，数据缺失意味着推算结果可能错误（把放假当天当工作日）。
+    // 此时不应继续购票——等 scanPlans 下次重试把数据拉回来再说。
+    if (!isDateReady(task.travelDate)) {
+      const missingYear = Number(task.travelDate.slice(0, 4));
+      TasksRepo.update(task.id, {
+        status: 'queried',
+        saleAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+        error: `${missingYear} 年节假日数据未就绪，5 分钟后自动重试`,
+        finishedAt: new Date().toISOString(),
+      });
+      wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
+      logger.warn('节假日数据未就绪，延后执行', { taskId: task.id, travelDate: task.travelDate });
+      return;
+    }
 
     const passengers = PassengersRepo.list(task.userId).filter((p) => plan.passengerIds.includes(p.id));
     if (!passengers.length) throw new Error('未选择乘车人');

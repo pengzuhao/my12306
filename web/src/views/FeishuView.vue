@@ -66,7 +66,7 @@ onMounted(load);
         <el-input v-model="form.secret" type="password" show-password placeholder="飞书机器人安全设置中的签名密钥" />
       </el-form-item>
       <el-form-item label="备注">
-        <el-input v-model="form.remark" placeholder="如：抢票通知群" />
+        <el-input v-model="form.remark" placeholder="如：购票通知群" />
       </el-form-item>
       <el-form-item label="启用">
         <el-switch v-model="form.enabled" />

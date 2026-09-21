@@ -1,9 +1,7 @@
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
-import bcrypt from 'bcryptjs';
-import { nanoid } from 'nanoid';
-import { DB_PATH, DATA_DIR } from '../config.js';
+import { DB_PATH, DATA_DIR, SYSTEM_USER_ID } from '../config.js';
 
 // 注意：本模块不依赖 Logger（Logger 反向依赖 db 写日志），否则会产生循环初始化。
 // DB 层自身日志直接走控制台。
@@ -43,6 +41,8 @@ export function applySchema(): void {
   migratePlansWeekEdgeColumn();
   addPlansOffsetDaysColumn();
   addPlansAllowNoSeatColumn();
+  addPlansSeatTypesColumn();
+  migrateToSingleUser();
   log('数据库 schema 已应用');
 }
 
@@ -144,15 +144,54 @@ function addPlansAllowNoSeatColumn(): void {
   log('已为 plans 增加 allow_no_seat 列（是否允许购买无座票，默认不允许）');
 }
 
-/** 初始化内置管理员账号 */
+/**
+ * 兼容迁移：plans 增加 seat_types 列（席别，必选多选）。
+ * 用户要求计划里必须选择席别（二等座/一等座等），订票时严格按所选席别匹配。
+ * 老计划没填过席别，默认给 ['ZE']（二等座，最常用），用户可自行编辑修改。
+ */
+function addPlansSeatTypesColumn(): void {
+  const db = getDb();
+  const cols = db.prepare('PRAGMA table_info(plans)').all() as Array<{ name: string }>;
+  if (cols.some((c) => c.name === 'seat_types')) return;
+  db.exec("ALTER TABLE plans ADD COLUMN seat_types TEXT NOT NULL DEFAULT '[\"ZE\"]'");
+  log('已为 plans 增加 seat_types 列（席别，老计划默认二等座）');
+}
+
+/**
+ * 兼容迁移：单用户模式。把所有历史用户的数据（plans/tasks/passengers/feishu_configs/
+ * railway_accounts/logs）统一归并到内置用户 SYSTEM_USER_ID，并删除旧用户行。
+ * 幂等：没有非内置用户时什么都不做。
+ */
+function migrateToSingleUser(): void {
+  const db = getDb();
+  const rows = db.prepare(`SELECT id FROM users WHERE id != ?`).all(SYSTEM_USER_ID) as Array<{ id: string }>;
+  if (!rows.length) return;
+  const legacyIds = rows.map((r) => r.id);
+  // 必须先把内置用户行建出来，否则外键约束会阻止 user_id 改指向它
+  db.prepare(
+    'INSERT INTO users (id, username, password_hash, role, display_name) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING',
+  ).run(SYSTEM_USER_ID, SYSTEM_USER_ID, '(disabled)', 'admin', '内置用户');
+  const tables = ['plans', 'tasks', 'passengers', 'feishu_configs', 'railway_accounts', 'logs'];
+  const tx = db.transaction((ids: string[]) => {
+    for (const id of ids) {
+      for (const t of tables) {
+        // logs.user_id 可空，其余均 NOT NULL；统一改归属到内置用户
+        db.prepare(`UPDATE ${t} SET user_id = ? WHERE user_id = ?`).run(SYSTEM_USER_ID, id);
+      }
+      db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    }
+  });
+  tx(legacyIds);
+  log(`已迁移 ${legacyIds.length} 个历史用户的数据到内置用户（单用户模式）`, { ids: legacyIds });
+}
+
+/** 初始化内置用户（单用户模式：固定 ID、无密码、不可登录） */
 export function seedAdmin(): void {
   const db = getDb();
-  const row = db.prepare('SELECT id FROM users WHERE role = ?').get('admin');
+  const row = db.prepare('SELECT id FROM users WHERE id = ?').get(SYSTEM_USER_ID);
   if (row) return;
-  const id = nanoid();
-  const hash = bcrypt.hashSync('admin123', 10);
   db.prepare(
     'INSERT INTO users (id, username, password_hash, role, display_name) VALUES (?, ?, ?, ?, ?)',
-  ).run(id, 'admin', hash, 'admin', '系统管理员');
-  log('已创建默认管理员账号: admin / admin123（请尽快修改密码）');
+  ).run(SYSTEM_USER_ID, SYSTEM_USER_ID, '(disabled)', 'admin', '内置用户');
+  log('已创建内置用户（单用户模式，无登录）');
 }

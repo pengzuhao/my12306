@@ -36,6 +36,8 @@ export interface PurchaseParams {
   timeTo?: string | null;
   /** 座位偏好 A/B/C/D/F（多选或空） */
   seatPositions?: string[] | null;
+  /** 席别（必选多选，如 ZE 二等座 / ZY 一等座）：严格按所选席别匹配，不回退未选席别 */
+  seatTypes?: string[] | null;
   /**
    * 是否允许购买无座票。默认 false：用户明确要求"除非计划里指定允许无座，
    * 否不要买无座票"。无座票也是正常可购票（长途车常有余票），但站着几小时
@@ -63,9 +65,21 @@ function inTimeRange(depart: string, from?: string | null, to?: string | null): 
   return depart >= from && depart <= to;
 }
 
-/** 按座位偏好计算席别优先级（A/F 靠窗 → 二等座 ZE 优先；B 中间；C/D 过道）。
- *  不含 SWZ（商务座）：用户明确要求严格按偏好席别匹配，绝不回退到商务座/无座。 */
-function preferSeatTypes(positions?: string[] | null): string[] {
+/**
+ * 计算席别优先级。
+ *
+ * 优先用计划显式选择的 seatTypes（必选多选，严格按所选匹配，不回退未选席别）。
+ * 没有时退化到旧逻辑：按座位位置 A/F 靠窗 → 二等座优先。
+ *
+ * 无论哪条路径都**不含 SWZ（商务座）**：用户明确要求不买商务座，
+ * 常规席别售罄即失败告警，绝不静默回退商务座。
+ */
+function preferSeatTypes(params: PurchaseParams): string[] {
+  // 计划显式选了席别：严格按用户选择，只过滤掉无效代码
+  const chosen = params.seatTypes?.filter((c) => SEAT_NAMES[c]) ?? [];
+  if (chosen.length) return chosen;
+  // 兼容旧计划（无 seatTypes）：按座位位置推断
+  const positions = params.seatPositions;
   if (!positions || !positions.length) return ['ZE', 'ZY', 'YW', 'RW', 'TZ'];
   const hasWindow = positions.some((p) => p === 'A' || p === 'F');
   return hasWindow ? ['ZE', 'ZY', 'YW', 'RW', 'TZ'] : ['ZY', 'ZE', 'YW', 'RW', 'TZ'];
@@ -74,7 +88,7 @@ function preferSeatTypes(positions?: string[] | null): string[] {
 /** 从余票结果中挑选目标车次（所选席别必须真有余票，不能只看字段非空） */
 export function pickTrain(trains: TrainInfo[], params: PurchaseParams): TrainInfo | null {
   const wanted = params.trainNumbers?.map((t) => t.toUpperCase());
-  const pref = preferSeatTypes(params.seatPositions);
+  const pref = preferSeatTypes(params);
   // 无座是否算"可接受的席别"：未显式允许时一律排除，避免买站票
   const noSeatOk = !!params.allowNoSeat;
   // 该车次是否有任一目标席别真有余票（"有"/数字>0），无座看开关
@@ -104,21 +118,22 @@ export function pickTrain(trains: TrainInfo[], params: PurchaseParams): TrainInf
   return candidates.find(hasPrefSeat) ?? candidates[0] ?? null;
 }
 
-/** 从车次中按席别优先级挑出真正有余票的席别 */
+/** 从车次中按席别优先级挑出真正有余票的席别。
+ *  严格匹配，不回退：常规席别（二等/一等/硬卧/软卧/特等）全部售罄即返回 null，
+ *  由调用方失败告警。绝不静默回退到商务座——用户明确要求不买商务座，
+ *  也不回退无座（除非计划显式开启 allowNoSeat，走下方单独分支）。 */
 function pickSeat(train: TrainInfo, params: PurchaseParams): { code: string; name: string } | null {
-  const ordered = preferSeatTypes(params.seatPositions);
+  const ordered = preferSeatTypes(params);
   for (const code of ordered) {
     const name = SEAT_NAMES[code];
     const left = seatCount(train.seats[name]);
     if (left > 0) return { code, name };
   }
-  // 回退：常规席别全部售罄时，接受任一有余票的席别，保证能成单。
-  // 无座票必须计划显式允许（allowNoSeat）才能回退，否则宁可不买也不站几小时。
-  const fallback = Object.entries(train.seats).find(([name, v]) => {
-    if (name === '无座' && !params.allowNoSeat) return false;
-    return seatCount(v) > 0;
-  });
-  return fallback ? { code: 'OTHER', name: fallback[0] } : null;
+  // 计划显式允许无座时，无座才作为可接受的最后选择
+  if (params.allowNoSeat && seatCount(train.seats['无座']) > 0) {
+    return { code: 'WZ', name: '无座' };
+  }
+  return null;
 }
 
 /**
@@ -337,9 +352,10 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
     // 二次校验：所选车次的目标席别必须真有余票（queryZ 缓存与实际可能有时间差）
     const seat = pickSeat(train, params);
     if (!seat) {
+      const wantedNames = preferSeatTypes(params).map((c) => SEAT_NAMES[c]).join('/');
       const reason = params.allowNoSeat
-        ? `${train.trainCode} 所有席别已无余票`
-        : `${train.trainCode} 目标席别已无余票（且计划未允许购买无座）`;
+        ? `${train.trainCode} 所选席别（${wantedNames}）及无座均已无余票`
+        : `${train.trainCode} 所选席别（${wantedNames}）已无余票（且计划未允许购买无座），严格匹配不回退商务座`;
       return { ok: false, trainCode: train.trainCode, passengers: names, error: reason };
     }
 

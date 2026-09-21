@@ -61,6 +61,8 @@ export interface Plan {
   trainNumbers: string[] | null;
   /** 座位偏好 A/B/C/D/F（可空 = 不指定） */
   seatPositions: string[] | null;
+  /** 席别（必选多选，如 ZE 二等座 / ZY 一等座）：订票严格按所选席别匹配，不回退未选席别 */
+  seatTypes: string[];
   /**
    * 是否允许购买无座票（默认 false）。
    * 用户明确要求：除非计划里勾选了"允许无座"，否则不要买无座票——
@@ -79,6 +81,7 @@ export type TaskStatus =
   | 'running' // 机器人执行中
   | 'success' // 购票成功（未支付）
   | 'failed'
+  | 'skipped' // 过期跳过（发车时间已过，不执行）
   | 'cancelled';
 
 export interface Task {

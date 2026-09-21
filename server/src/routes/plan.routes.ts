@@ -6,9 +6,10 @@ import { z } from 'zod';
 import { PassengersRepo, PlansRepo, PlanDatesRepo, TasksRepo } from '../db/repo.js';
 import { currentUser } from './auth.routes.js';
 import { previewForPlan } from '../plans/date-engine.js';
-import { ensureYears, isWorkday, holidayName } from '../calendar/holidays.js';
+import { ensureYears, isWorkday, holidayName, addDays } from '../calendar/holidays.js';
 import { Logger } from '../logger.js';
 import { nanoid } from 'nanoid';
+import { DEFAULT_PRESALE_DAYS } from '../config.js';
 
 const logger = new Logger('plan');
 
@@ -37,46 +38,42 @@ const planSchema = z.object({
   timeTo: z.string().nullable().optional(),
   trainNumbers: z.array(z.string()).nullable().optional(),
   seatPositions: z.array(z.enum(['A', 'B', 'C', 'D', 'F'])).min(1, '请至少选择一个座位席别'),
+  /** 席别（必选多选）：订票时严格按所选席别匹配，不回退未选席别 */
+  seatTypes: z.array(z.enum(['ZE', 'ZY', 'TZ', 'GR', 'RW', 'YW', 'RZ', 'YZ'])).min(1, '请至少选择一个席别'),
   allowNoSeat: z.boolean().default(false),
   passengerIds: z.array(z.string()).min(1),
 });
 
 export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, done) => {
   /** 乘车人列表 */
-  app.get('/api/passengers', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+  app.get('/api/passengers', async () => {
+    const user = currentUser();
     return PassengersRepo.list(user.id);
   });
 
   /** 新增/更新乘车人 */
   app.post('/api/passengers', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+    const user = currentUser();
     const parsed = passengerSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: '参数错误', detail: parsed.error.flatten() });
     return PassengersRepo.upsert(user.id, { ...parsed.data, source: 'manual', phone: parsed.data.phone ?? null });
   });
 
-  app.delete('/api/passengers/:id', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+  app.delete('/api/passengers/:id', async (request) => {
     const { id } = request.params as { id: string };
     PassengersRepo.delete(id);
     return { ok: true };
   });
 
   /** 计划列表 */
-  app.get('/api/plans', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+  app.get('/api/plans', async () => {
+    const user = currentUser();
     return PlansRepo.list(user.id);
   });
 
   /** 新建/更新计划 */
   app.post('/api/plans', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+    const user = currentUser();
     const parsed = planSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: '参数错误', detail: parsed.error.flatten() });
     const body = parsed.data;
@@ -110,6 +107,7 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
       timeTo: body.timeTo ?? null,
       trainNumbers: body.trainNumbers ?? null,
       seatPositions: body.seatPositions ?? null,
+      seatTypes: body.seatTypes,
       allowNoSeat: body.allowNoSeat,
       passengerIds: body.passengerIds,
     });
@@ -119,8 +117,7 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
 
   /** 暂停/恢复/删除计划 */
   app.post('/api/plans/:id/status', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+    const user = currentUser();
     const { id } = request.params as { id: string };
     const { status } = z.object({ status: z.enum(['active', 'paused', 'deleted']) }).parse(request.body);
     const plan = PlansRepo.get(id);
@@ -134,46 +131,78 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
    * 支持不存库直接预览（新建计划前先看推算结果）。
    */
   app.post('/api/plans/preview-dates', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+    const user = currentUser();
     const parsed = planSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: '参数错误', detail: parsed.error.flatten() });
     const body = parsed.data;
     // 预估起售日期 = 乘车日期 - 预售期（精确起售时刻由起售查询接口确定）
-    const entries = await previewForPlan({
-      dateMode: body.dateMode,
-      travelDate: body.travelDate ?? null,
-      weekday: body.weekday ?? null,
-      weekEdge: body.weekEdge ?? null,
-      weekInterval: body.weekInterval,
-      offsetDays: body.offsetDays,
-      validFrom: body.validFrom,
-      validUntil: body.validUntil ?? null,
-      timeFrom: body.timeFrom ?? null,
-      timeTo: body.timeTo ?? null,
-    });
-    return entries;
+    // 节假日数据是工作周推算的前提，缺失时返回可读错误而不是 500
+    try {
+      const entries = await previewForPlan({
+        dateMode: body.dateMode,
+        travelDate: body.travelDate ?? null,
+        weekday: body.weekday ?? null,
+        weekEdge: body.weekEdge ?? null,
+        weekInterval: body.weekInterval,
+        offsetDays: body.offsetDays,
+        validFrom: body.validFrom,
+        validUntil: body.validUntil ?? null,
+        timeFrom: body.timeFrom ?? null,
+        timeTo: body.timeTo ?? null,
+      });
+      return entries;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.warn('推算预览失败', { by: user.username, error: msg });
+      return reply.code(400).send({ error: msg });
+    }
   });
 
   /** 已保存计划的推算日期 + 关联任务状态 */
   app.get('/api/plans/:id/dates', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+    const user = currentUser();
     const { id } = request.params as { id: string };
     const plan = PlansRepo.get(id);
     if (!plan || plan.userId !== user.id) return reply.code(404).send({ error: '计划不存在' });
-    const entries = await previewForPlan(plan);
     const tasks = TasksRepo.list(user.id, 200);
-    return entries.map((e) => {
-      const task = tasks.find((t) => t.travelDate === e.travelDate);
-      return { ...e, task: task ?? null };
-    });
+
+    // 1) 优先返回已持久化的推算结果（调度器每 5 分钟刷新入库）。
+    //    详情展示的是"执行历史"，用库里的数据即可，不必每次实时推算——
+    //    实时推算依赖节假日网络数据，缺年份时会抛错导致 500。
+    const saved = PlanDatesRepo.list(id);
+    if (saved.length) {
+      return saved.map((d) => {
+        const task = tasks.find((t) => t.planId === id && t.travelDate === d.travelDate) ?? null;
+        return {
+          travelDate: d.travelDate,
+          originalDate: d.originalDate,
+          weekday: d.weekday,
+          postponed: d.postponed,
+          isWorkday: isWorkday(d.travelDate),
+          note: undefined,
+          estimatedSaleDate: addDays(d.travelDate, -DEFAULT_PRESALE_DAYS),
+          task,
+        };
+      });
+    }
+
+    // 2) 表为空（计划刚建、调度器还没扫描到）：实时推算兜底；失败也不 500，
+    //    返回空列表让前端正常渲染，调度器扫描后自然有数据。
+    try {
+      const entries = await previewForPlan(plan);
+      return entries.map((e) => {
+        const task = tasks.find((t) => t.planId === id && t.travelDate === e.travelDate) ?? null;
+        return { ...e, task };
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.warn('计划详情推算失败，返回空列表等调度器刷新', { plan: plan.name, error: msg });
+      return [];
+    }
   });
 
   /** 站点搜索（下拉提示） */
-  app.get('/api/stations', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+  app.get('/api/stations', async (request) => {
     const { keyword } = request.query as { keyword?: string };
     if (!keyword) return [];
     const { searchStations } = await import('../bot/stations.js');
@@ -181,24 +210,31 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
   });
 
   /**
-   * 节假日日历：给定年月，返回该月每天的节假日信息（供前端日历标记）。
+   * 节假日日历：year 必填、month 可选。
+   *  - 传 month：返回该月每天的节假日信息（兼容旧调用方）
+   *  - 不传 month：返回该自然年全部 12 个月（供前端按年缓存，切月份时零延迟）
    * 节假日数据可能跨年（如 10 月含国庆），自动加载相邻年份。
+   * 后端按自然年缓存（holidays.json 持久化 + 内存），只有首次查询某年才调外部接口。
    */
   app.get('/api/calendar/holidays', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
     const { year, month } = request.query as { year?: string; month?: string };
     const y = Number(year);
-    const m = Number(month);
-    if (!Number.isInteger(y) || !Number.isInteger(m) || m < 1 || m > 12) {
-      return reply.code(400).send({ error: 'year/month 参数无效' });
+    if (!Number.isInteger(y)) {
+      return reply.code(400).send({ error: 'year 参数无效' });
+    }
+    const m = month !== undefined && month !== '' ? Number(month) : null;
+    if (m !== null && (!Number.isInteger(m) || m < 1 || m > 12)) {
+      return reply.code(400).send({ error: 'month 参数无效' });
     }
     await ensureYears([y - 1, y, y + 1]);
-    const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    const months = m !== null ? [m] : Array.from({ length: 12 }, (_, i) => i + 1);
     const out: Array<{ date: string; isWorkday: boolean; holiday: string | null }> = [];
-    for (let d = 1; d <= daysInMonth; d++) {
-      const dateStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-      out.push({ date: dateStr, isWorkday: isWorkday(dateStr), holiday: holidayName(dateStr) });
+    for (const mm of months) {
+      const daysInMonth = new Date(Date.UTC(y, mm, 0)).getUTCDate();
+      for (let d = 1; d <= daysInMonth; d++) {
+        const dateStr = `${y}-${String(mm).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+        out.push({ date: dateStr, isWorkday: isWorkday(dateStr), holiday: holidayName(dateStr) });
+      }
     }
     return out;
   });

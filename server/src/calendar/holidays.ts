@@ -94,8 +94,12 @@ async function fetchDayFromTimor(date: string): Promise<HolidayEntry | null> {
   }
 }
 
-/** 确保指定年份的节假日数据已就绪 */
-export async function ensureYears(years: number[]): Promise<void> {
+/**
+ * 确保指定年份的节假日数据已就绪。
+ * @returns 实际"已确认"（缓存命中或拉取成功）的年份集合——
+ *          拉取失败的年份不在其中，调用方应据此决定是否继续推算。
+ */
+export async function ensureYears(years: number[]): Promise<Set<number>> {
   loadCache();
   const missing = years.filter((y) => !cache.has(y));
   for (const year of missing) {
@@ -105,6 +109,18 @@ export async function ensureYears(years: number[]): Promise<void> {
       persistCache();
     }
   }
+  return new Set(years.filter((y) => cache.has(y)));
+}
+
+/** 某一年的节假日数据是否已确认（缓存命中）。供推算/执行做前提校验用 */
+export function isYearReady(year: number): boolean {
+  loadCache();
+  return cache.has(year);
+}
+
+/** 某日期所在年的节假日数据是否已确认 */
+export function isDateReady(date: string): boolean {
+  return isYearReady(Number(date.slice(0, 4)));
 }
 
 /** 同步获取某日的节假日条目（需先 ensureYears） */

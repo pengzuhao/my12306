@@ -20,9 +20,8 @@ const logger = new Logger('session');
 
 export const sessionRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, done) => {
   /** 会话状态 */
-  app.get('/api/session', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+  app.get('/api/session', async () => {
+    const user = currentUser();
     return getSessionState(user.id);
   });
 
@@ -31,9 +30,8 @@ export const sessionRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts
    * 异步：立即返回"已发起"，浏览器在后台打开扫码页并把二维码通过 WS（qr_code 消息）推送。
    * 用户在管理台扫码确认后，登录结果通过 session 消息推送，前端不阻塞等待此 HTTP 响应。
    */
-  app.post('/api/session/login', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+  app.post('/api/session/login', async () => {
+    const user = currentUser();
     // 异步发起，不阻塞 HTTP；并发重复登录由 loginInteractive 内部锁拦截
     void loginInteractive(user.id).catch((e) => {
       const msg = e instanceof Error ? e.message : String(e);
@@ -43,36 +41,32 @@ export const sessionRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts
   });
 
   /** 取消扫码登录 */
-  app.post('/api/session/cancel-login', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+  app.post('/api/session/cancel-login', async () => {
+    const user = currentUser();
     cancelQrLogin(user.id);
     return { ok: true };
   });
 
   /** 主动检查一次会话有效性 */
-  app.post('/api/session/check', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+  app.post('/api/session/check', async () => {
+    const user = currentUser();
     const ctx = await getContext(user.id).catch(() => null);
-    if (!ctx) return reply.code(400).send({ error: '浏览器未启动' });
+    if (!ctx) return { loggedIn: false, state: getSessionState(user.id) };
     const ok = await checkLoggedIn(ctx);
     if (ok) RailwayAccountRepo.touchCheck(user.id);
     return { loggedIn: ok, state: getSessionState(user.id) };
   });
 
   /** 退出登录 */
-  app.post('/api/session/logout', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+  app.post('/api/session/logout', async () => {
+    const user = currentUser();
     await closeSession(user.id);
     return { ok: true };
   });
 
   /** 从 12306 同步常用联系人（登录后可用） */
   app.post('/api/session/sync-passengers', async (request, reply) => {
-    const user = currentUser(request);
-    if (!user) return reply.code(401).send({ error: '未登录' });
+    const user = currentUser();
     const acc = RailwayAccountRepo.get(user.id);
     if (!acc || acc.status !== 'active') return reply.code(400).send({ error: '12306 未登录，请先在会话页登录' });
     const ctx = await getContext(user.id);
