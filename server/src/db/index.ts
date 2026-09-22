@@ -173,10 +173,17 @@ function migrateToSingleUser(): void {
   ).run(SYSTEM_USER_ID, SYSTEM_USER_ID, '(disabled)', 'admin', '内置用户');
   const tables = ['plans', 'tasks', 'passengers', 'feishu_configs', 'railway_accounts', 'logs'];
   const tx = db.transaction((ids: string[]) => {
+    // 先清空内置用户的存量行：这些表对 user_id 有唯一约束
+    // （feishu_configs.user_id UNIQUE），旧用户数据改归属过来会撞约束
+    for (const t of tables) {
+      db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(SYSTEM_USER_ID);
+    }
+    // 多个旧用户可能各有 feishu_configs 行（user_id UNIQUE），
+    // 直接 UPDATE 会互相撞唯一约束：先全部置空再统一改归属
     for (const id of ids) {
       for (const t of tables) {
         // logs.user_id 可空，其余均 NOT NULL；统一改归属到内置用户
-        db.prepare(`UPDATE ${t} SET user_id = ? WHERE user_id = ?`).run(SYSTEM_USER_ID, id);
+        db.prepare(`UPDATE OR REPLACE ${t} SET user_id = ? WHERE user_id = ?`).run(SYSTEM_USER_ID, id);
       }
       db.prepare('DELETE FROM users WHERE id = ?').run(id);
     }

@@ -24,7 +24,7 @@ import { getContext, getSessionState } from '../bot/session.js';
 import { purchaseTicket } from '../bot/order.js';
 import { findBlockingUnpaid } from '../bot/orders.js';
 import { querySaleTime } from '../bot/tickets.js';
-import { queryPurchasedTickets } from '../bot/reconcile.js';
+import { queryPurchasedTickets, type PurchasedTicket } from '../bot/reconcile.js';
 import { notifyOrderSuccess, notifyTaskFailed } from '../notify/feishu.js';
 import { DEFAULT_PRESALE_DAYS } from '../config.js';
 import type { Passenger, Plan, Task } from '../types.js';
@@ -240,7 +240,15 @@ async function reconcileBeforeSale(): Promise<void> {
         logger.warn('对账：浏览器上下文获取失败', { plan: plan.name, error: e });
         return;
       }
-      const purchased = await queryPurchasedTickets(ctx);
+      // 整轮对账包一层：订单预热/查询任何一步失败（如登录态失效被重定向到登录页）
+      // 都不能让异常冒泡成 unhandled rejection 拖垮整个服务进程
+      let purchased: Map<string, PurchasedTicket> | null;
+      try {
+        purchased = await queryPurchasedTickets(ctx);
+      } catch (e) {
+        logger.warn('对账：订单查询异常', { plan: plan.name, error: e });
+        return;
+      }
       if (!purchased) {
         logger.warn('对账：订单查询全部失败，跳过本轮', { plan: plan.name });
         return;
