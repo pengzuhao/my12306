@@ -65,6 +65,10 @@ interface DayCell {
   day: number;
   date: string;
   tickets: OrderRow[];
+  /** 该日节假日信息（预算好，模板直接读，不重复查表） */
+  hol: HolidayDay | undefined;
+  /** 是否今天（预算好，模板不算日期） */
+  isToday: boolean;
 }
 /** 月份网格（前置空位用 null 占位） */
 const calendarCells = computed<(DayCell | null)[]>(() => {
@@ -72,6 +76,9 @@ const calendarCells = computed<(DayCell | null)[]>(() => {
   const m = calMonth.value.getMonth();
   const startWeekday = new Date(y, m, 1).getDay();
   const daysInMonth = new Date(y, m + 1, 0).getDate();
+  const hmap = holidayMap.value;
+  const today = todayStr.value;
+  const paid = paidOrders.value;
   const cells: (DayCell | null)[] = [];
   for (let i = 0; i < startWeekday; i++) cells.push(null);
   for (let d = 1; d <= daysInMonth; d++) {
@@ -79,7 +86,9 @@ const calendarCells = computed<(DayCell | null)[]>(() => {
     cells.push({
       day: d,
       date: dateStr,
-      tickets: paidOrders.value.filter((o) => (o.travelDateTime ?? '').slice(0, 10) === dateStr),
+      tickets: paid.filter((o) => (o.travelDateTime ?? '').slice(0, 10) === dateStr),
+      hol: hmap.get(dateStr),
+      isToday: dateStr === today,
     });
   }
   return cells;
@@ -146,9 +155,16 @@ async function reloadHolidays(): Promise<void> {
   }
 }
 
+/** date -> 节假日信息 的查表 Map（一次构建，模板 O(1) 查询） */
+const holidayMap = computed(() => {
+  const map = new Map<string, HolidayDay>();
+  for (const h of holidays.value) map.set(h.date, h);
+  return map;
+});
+
 /** 某日期的节假日信息（放假/补班），用于日历格子标记 */
 function holidayOf(dateStr: string): HolidayDay | undefined {
-  return holidays.value.find((h) => h.date === dateStr);
+  return holidayMap.value.get(dateStr);
 }
 
 watch(calMonth, () => void reloadHolidays(), { immediate: false });
@@ -203,11 +219,17 @@ async function fetchOrders(first: boolean): Promise<void> {
   }
 }
 
-async function reload(): Promise<void> {
-  loading.value = true;
+/**
+ * 统计卡数据（飞书 + 任务）：两个接口互相独立，并行拉取。
+ * 与车票/节假日解耦，不再被 12306 车票查询拖住。
+ */
+async function reloadStats(): Promise<void> {
   try {
-    feishu.value = await feishuApi.get();
-    const tasks = (await taskApi.list()) as Array<{ status: string }>;
+    const [feishuData, tasks] = (await Promise.all([feishuApi.get(), taskApi.list()])) as [
+      Record<string, unknown>,
+      Array<{ status: string }>,
+    ];
+    feishu.value = feishuData;
     stats.value = {
       pending: tasks.filter((t) => t.status === 'pending').length,
       queried: tasks.filter((t) => t.status === 'queried').length,
@@ -215,9 +237,8 @@ async function reload(): Promise<void> {
       success: tasks.filter((t) => t.status === 'success').length,
       failed: tasks.filter((t) => t.status === 'failed').length,
     };
-    await reloadOrders();
-  } finally {
-    loading.value = false;
+  } catch {
+    // 统计卡失败不应影响日历：保留默认值，下次可见性刷新时重试
   }
 }
 
@@ -241,9 +262,16 @@ watch(
   },
 );
 
-onMounted(async () => {
-  await reload();
+onMounted(() => {
+  // 关键优化：三路并行，互不阻塞——
+  //  - 节假日走本地 holidays.json，毫秒级返回，日历立刻有工作日/节假日着色
+  //  - 统计卡（飞书 + 任务）本地 DB，也快
+  //  - 车票要走 12306 浏览器，最慢，独立加载不挡着日历渲染，到了再填进去
+  // 之前是 await 链：feishu → tasks → orders 全部跑完才查节假日，
+  // 日历着色被秒级车票接口拖住，体感「卡一下才亮」。
   void reloadHolidays();
+  void reloadStats();
+  void reloadOrders();
   // 页面从隐藏切回可见时静默刷新车票（用户重新看页面 = 最佳刷新时机）
   // 10 分钟内已有缓存则跳过，避免频繁请求
   document.addEventListener('visibilitychange', onVisible);
@@ -343,16 +371,16 @@ function onVisible(): void {
                 v-if="cell"
                 class="cal-cell"
                 :class="{
-                  'cal-today': cell.date === todayStr,
-                  'cal-holiday': holidayOf(cell.date)?.holiday && !holidayOf(cell.date)?.isWorkday,
-                  'cal-makeUp': holidayOf(cell.date)?.holiday && holidayOf(cell.date)?.isWorkday,
-                  'cal-workday': !holidayOf(cell.date)?.holiday && holidayOf(cell.date)?.isWorkday,
-                  'cal-rest': !holidayOf(cell.date)?.holiday && !holidayOf(cell.date)?.isWorkday,
+                  'cal-today': cell.isToday,
+                  'cal-holiday': cell.hol?.holiday && !cell.hol?.isWorkday,
+                  'cal-makeUp': cell.hol?.holiday && cell.hol?.isWorkday,
+                  'cal-workday': !cell.hol?.holiday && cell.hol?.isWorkday,
+                  'cal-rest': !cell.hol?.holiday && !cell.hol?.isWorkday,
                 }"
               >
                 <div class="cal-day">
-                  {{ cell.day }}<span v-if="holidayOf(cell.date)?.holiday && !holidayOf(cell.date)?.isWorkday" class="cal-hol-tag">{{ holidayOf(cell.date)?.holiday }}</span>
-                  <span v-else-if="!holidayOf(cell.date)?.holiday && holidayOf(cell.date)?.isWorkday" class="cal-work-tag">班</span>
+                  {{ cell.day }}<span v-if="cell.hol?.holiday && !cell.hol?.isWorkday" class="cal-hol-tag">{{ cell.hol?.holiday }}</span>
+                  <span v-else-if="!cell.hol?.holiday && cell.hol?.isWorkday" class="cal-work-tag">班</span>
                 </div>
                 <div
                   v-for="t in cell.tickets.slice(0, 1)"

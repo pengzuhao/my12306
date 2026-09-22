@@ -155,29 +155,47 @@ async function fetchDayFromTimor(date: string): Promise<HolidayEntry | null> {
  */
 export async function ensureYears(years: number[]): Promise<Set<number>> {
   loadCache();
-  const missing = years.filter((y) => !cache.has(y));
-  for (const year of missing) {
-    const map = await fetchYearFromHolidayCn(year);
-    if (map) {
-      cache.set(year, map);
-      persistCache();
-      notifyReadyIfNewlyAvailable(year, true);
-      continue;
-    }
-    // holiday-cn 拉不到（数据源未更新或网络问题）：用 timor 逐日查询补齐
-    const fallback = await fetchYearFromTimor(year);
-    if (fallback) {
-      cache.set(year, fallback);
-      persistCache();
-      logger.info(`timor 逐日补齐成功：${year} 年 ${Object.keys(fallback).length} 条`);
-      notifyReadyIfNewlyAvailable(year, true);
-      continue;
-    }
-    // 两个数据源都失败：标记降级，工作日判定退回自然周兜底
-    degradedYears.add(year);
-    logger.warn(`${year} 年节假日数据两个数据源均拉取失败，该年按自然周降级推算`, undefined);
+  const now = Date.now();
+  // 近期已尝试且失败的年份短期不重试——未发布的年份（如 2027/2028）每次请求
+  // 都会走两轮网络（holiday-cn + timor 探针），每次数秒，把日历接口拖死。
+  // 进程内记忆即可：重启后最多再试一轮，代价可接受。
+  const missing = years.filter((y) => !cache.has(y) && (!failedAt.has(y) || now - (failedAt.get(y) ?? 0) > RETRY_INTERVAL_MS));
+  if (missing.length) {
+    // 各年数据互相独立，并行拉取——之前串行 await 时，一个年份卡住会拖慢整批
+    // （典型场景：查当前年要顺带确保相邻年，某个相邻年未发布会走 timor 兜底，
+    //  60 次串行 HTTP 请求把日历接口阻塞数十秒）
+    await Promise.all(missing.map((year) => ensureOneYear(year)));
   }
   return new Set(years.filter((y) => cache.has(y)));
+}
+
+/** 某年最近一次拉取失败的时间戳（用于短期跳过重试） */
+const failedAt = new Map<number, number>();
+/** 失败后的重试间隔：一小时。节假日数据以年为单位变化，不必高频重试 */
+const RETRY_INTERVAL_MS = 60 * 60 * 1000;
+
+/** 拉取单年节假日并写缓存（holiday-cn 优先，timor 兜底，两者皆失败则降级） */
+async function ensureOneYear(year: number): Promise<void> {
+  const map = await fetchYearFromHolidayCn(year);
+  if (map) {
+    cache.set(year, map);
+    persistCache();
+    notifyReadyIfNewlyAvailable(year, true);
+    return;
+  }
+  // holiday-cn 拉不到（数据源未更新或网络问题）：用 timor 逐日查询补齐
+  const fallback = await fetchYearFromTimor(year);
+  if (fallback) {
+    cache.set(year, fallback);
+    persistCache();
+    logger.info(`timor 逐日补齐成功：${year} 年 ${Object.keys(fallback).length} 条`);
+    notifyReadyIfNewlyAvailable(year, true);
+    return;
+  }
+  // 两个数据源都失败：标记降级，工作日判定退回自然周兜底
+  degradedYears.add(year);
+  failedAt.set(year, Date.now());
+  logger.warn(`${year} 年节假日数据两个数据源均拉取失败，该年按自然周降级推算（1 小时内不重试）`, undefined);
 }
 
 /**
@@ -205,11 +223,14 @@ async function fetchYearFromTimor(year: number): Promise<HolidayMap | null> {
     ...range(9, 1, 10), // 中秋
     ...range(10, 1, 10), // 国庆
   ];
-  const dates = new Set(candidates.map(([m, d]) => p(m, d)));
-  for (const date of dates) {
-    if (map[date]) continue;
-    const entry = await fetchDayFromTimor(date);
-    if (entry) map[date] = entry;
+  const dates = [...new Set(candidates.map(([m, d]) => p(m, d)))].filter((d) => !map[d]);
+  // 并发查询（限制 8 路，兼顾速度与对方服务器压力），任一失败只是少一条记录
+  for (let i = 0; i < dates.length; i += 8) {
+    const batch = dates.slice(i, i + 8);
+    const results = await Promise.all(batch.map((date) => fetchDayFromTimor(date).then((e) => [date, e] as const)));
+    for (const [date, entry] of results) {
+      if (entry) map[date] = entry;
+    }
   }
   return map;
 

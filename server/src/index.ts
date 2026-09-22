@@ -27,6 +27,7 @@ import { miscRoutes } from './routes/misc.routes.js';
 import { startScheduler } from './scheduler/scheduler.js';
 import { startKeepalive, cancelQrLogin } from './bot/session.js';
 import { cleanupBrowser } from './bot/browser.js';
+import { ensureYears } from './calendar/holidays.js';
 
 const logger = new Logger('app');
 
@@ -101,6 +102,13 @@ async function bootstrap(): Promise<void> {
 
   await app.listen({ host: HOST, port: PORT });
   logger.info(`my12306 后端服务已启动: http://${HOST}:${PORT}`);
+
+  // 启动后后台预热当年的节假日数据，首次打开首页日历即可命中本地缓存
+  // （不 await、不阻塞启动；某年数据源未发布时只是降级，不影响服务可用）
+  const y = new Date().getFullYear();
+  void ensureYears([y]).then((ok) => {
+    logger.info(`节假日数据预热完成：${[...ok].join(', ') || '无'}`);
+  });
 }
 
 void bootstrap().catch((e) => {
