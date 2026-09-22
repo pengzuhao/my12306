@@ -1,3 +1,5 @@
+import { userCanRun } from '../db/repo.js';
+import { logContext } from '../logger.js';
 /**
  * 购票调度器（需求 5 + 用户强调的及时性）。
  *
@@ -100,12 +102,11 @@ const userLocks = new Map<string, Promise<unknown>>();
 function withUserLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
   const prev = userLocks.get(userId) ?? Promise.resolve();
   const next: Promise<unknown> = prev.then(
-    () => fn(),
-    () => fn(),
+    () => logContext.run(userId, fn),
+    () => logContext.run(userId, fn),
   );
-  next.finally(() => {
-    if (userLocks.get(userId) === next) userLocks.delete(userId);
-  });
+  const clear = () => { if (userLocks.get(userId) === next) userLocks.delete(userId); };
+  void next.then(clear, clear);
   userLocks.set(userId, next);
   return next as Promise<T>;
 }
@@ -115,26 +116,16 @@ function withUserLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
  *
  * 乘车日期 < 今天 → 一定过期。
  * 乘车日期 == 今天 → 看发车时间：
- *   - 计划填了 timeFrom（如 08:00）：当前时间已过发车时间即过期
- *   - 计划没填时间：起售时刻 saleAt 已过去 2 小时即过期
- *     （起售通常在发车前 15 天的 8 点；过了发车点还去查，查票页该车次已不在可售列表）
+ *   - 计划填写 timeTo 时，只有整个时间窗口结束后才过期。
+ *   - 未指定时间上限时，由实时余票查询过滤已发车车次，不能按起售时间判定。
  */
-function isExpired(task: Task, plan: Plan | null | undefined): boolean {
+export function isExpired(task: Task, plan: Plan | null | undefined): boolean {
   const t = task.travelDate;
   const todayStr = today();
   if (t < todayStr) return true;
   if (t > todayStr) return false;
-  // 同一天：判断是否已发车
-  const depTime = plan?.timeFrom ?? null;
-  if (depTime) {
-    const nowHm = nowHmCn();
-    return nowHm > depTime;
-  }
-  // 没填发车时间：起售时刻过去 2 小时兜底
-  if (task.saleAt) {
-    const saleAtMs = Date.parse(task.saleAt);
-    if (!Number.isNaN(saleAtMs)) return Date.now() - saleAtMs > 2 * 60 * 60 * 1000;
-  }
+  // 同日只在整个出发窗口结束后过期；起售时间不能用于推断发车时间。
+  if (plan?.timeTo) return nowHmCn() > plan.timeTo;
   return false;
 }
 
@@ -142,7 +133,7 @@ function isExpired(task: Task, plan: Plan | null | undefined): boolean {
 function expiredReason(task: Task, plan: Plan | null | undefined): string {
   const t = task.travelDate;
   if (t < today()) return '乘车日期已过，跳过执行';
-  if (plan?.timeFrom) return `今日 ${plan.timeFrom} 的列车已发车，跳过执行`;
+  if (plan?.timeTo) return `今日出发时间段已于 ${plan.timeTo} 结束，跳过执行`;
   return '列车已发车，跳过执行';
 }
 
@@ -187,10 +178,10 @@ async function scanPlans(): Promise<void> {
           trainNumber: plan.trainNumbers?.[0] ?? null,
           saleAt: null,
         });
-        logger.info('已创建购票任务', { plan: plan.name, travelDate: e.travelDate, postponed: e.postponed });
+        logger.info('已创建购票任务', { userId: plan.userId, plan: plan.name, travelDate: e.travelDate, postponed: e.postponed });
       }
     } catch (e) {
-      logger.error('计划扫描失败', { plan: plan.name, error: e });
+      logger.error('计划扫描失败', { userId: plan.userId, plan: plan.name, error: e });
     }
   }
 }
@@ -214,12 +205,12 @@ async function resolveSaleTimes(): Promise<void> {
       const ctx = await getContext(task.userId);
       const page = await ctx.newPage();
       try {
-        const { saleAt, source } = await querySaleTime(page, {
+        const { saleAt, source } = await logContext.run(task.userId, () => querySaleTime(page, {
           trainDate: task.travelDate,
-          trainCode: task.trainNumber,
+          trainCode: task.trainNumber!,
           fromStation: plan.fromStation,
           toStation: plan.toStation,
-        });
+        }));
         TasksRepo.update(task.id, { status: 'queried', saleAt });
         logger.info('起售时间已确定', { taskId: task.id, saleAt, source });
       } finally {
@@ -237,7 +228,7 @@ async function triggerDueTasks(): Promise<void> {
   const due = TasksRepo.listDue(nowIso, 10);
   for (const task of due) {
     if (runningLocks.has(task.id)) continue;
-    void runTask(task);
+    void logContext.run(task.userId, () => runTask(task));
   }
 }
 
@@ -271,7 +262,7 @@ async function reconcileBeforeSale(): Promise<void> {
       try {
         ctx = await getContext(plan.userId);
       } catch (e) {
-        logger.warn('对账：浏览器上下文获取失败', { plan: plan.name, error: e });
+        logger.warn('对账：浏览器上下文获取失败', { userId: plan.userId, plan: plan.name, error: e });
         return;
       }
       // 整轮对账包一层：订单预热/查询任何一步失败（如登录态失效被重定向到登录页）
@@ -280,7 +271,7 @@ async function reconcileBeforeSale(): Promise<void> {
       try {
         purchased = await queryPurchasedTickets(ctx);
       } catch (e) {
-        logger.warn('对账：订单查询异常', { plan: plan.name, error: e });
+        logger.warn('对账：订单查询异常', { userId: plan.userId, plan: plan.name, error: e });
         return;
       }
       if (!purchased) {
@@ -302,7 +293,7 @@ async function reconcileBeforeSale(): Promise<void> {
             logger.info('对账回滚：重新等待执行', { taskId: t.id, plan: plan.name, travelDate: d.travelDate, saleAt: t.saleAt });
           }
         }
-        logger.info('对账回滚：当日车票已失效', { plan: plan.name, travelDate: d.travelDate });
+        logger.info('对账回滚：当日车票已失效', { userId: plan.userId, plan: plan.name, travelDate: d.travelDate });
       }
     });
   }
@@ -356,6 +347,7 @@ function schedulePayDeadlineCheck(task: Task, plan: Plan, payDeadlineTs: number)
 
 /** 支付到期闹钟触发：重查订单，决定保持 done 还是回滚重订 */
 async function onPayDeadlineReached(task: Task, plan: Plan, recheck: number): Promise<void> {
+  if (!userCanRun(task.userId)) return;
   // 任务已不在 success（被对账回滚/取消/重跑过），闹钟作废
   const cur = TasksRepo.get(task.id);
   if (!cur || cur.status !== 'success') {
@@ -435,6 +427,7 @@ async function purchaseTicketWithRetry(task: Task, plan: Plan, passengers: Passe
     fromStation: plan.fromStation,
     toStation: plan.toStation,
     trainNumbers: plan.trainNumbers,
+    trainSegments: plan.trainSegments,
     timeFrom: plan.timeFrom,
     timeTo: plan.timeTo,
     seatPositions: plan.seatPositions,
@@ -458,11 +451,12 @@ function isTransientFailure(error?: string | null): boolean {
 
 /** 执行单个购票任务（含退避重试） */
 async function runTask(task: Task): Promise<void> {
+  if (!userCanRun(task.userId)) return;
   runningLocks.add(task.id);
   const plan = PlansRepo.get(task.planId);
   try {
-    // 过期判断：乘车日期已过，或同一天但列车已发车（发车时间取计划时间范围下限；
-    // 计划没填时间则按起售时刻已过去 2 小时兜底——车早开了，下单毫无意义）。
+    if (!plan || plan.status !== 'active') return;
+    // 乘车日期已过，或今天的整个出发时间窗口已经结束。
     if (isExpired(task, plan)) {
       const reason = expiredReason(task, plan);
       TasksRepo.update(task.id, {
@@ -474,7 +468,15 @@ async function runTask(task: Task): Promise<void> {
       logger.info('任务已过期，跳过执行', { taskId: task.id, travelDate: task.travelDate, reason });
       return;
     }
-    TasksRepo.update(task.id, { status: 'running', startedAt: new Date().toISOString(), attempts: task.attempts + 1 });
+    // 升级或修改规则后，数据库中可能仍有旧日期；执行前再按当前规则校验。
+    const validDates = await computeDates(plan);
+    if (!validDates.some(entry => entry.travelDate === task.travelDate)) {
+      TasksRepo.update(task.id, { status: 'skipped', error: '计划日期已重新推算，该日期不再符合当前规则', finishedAt: new Date().toISOString() });
+      wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
+      return;
+    }
+    if (TasksRepo.get(task.id)?.status !== 'queried' || PlansRepo.get(plan.id)?.status !== 'active') return;
+    TasksRepo.update(task.id, { status: 'queued', startedAt: null });
     wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
 
     const acc = RailwayAccountRepo.get(task.userId);
@@ -508,26 +510,27 @@ async function runTask(task: Task): Promise<void> {
     //
     // 预检和购票同在用户锁内：两者共用同一浏览器上下文，不锁起来会和并发的
     // 对账/其他任务互相踩踏（曾经导致"点击预订后未进入确认页"）。
-    const deferred = await withUserLock(task.userId, async () => {
+    const result = await withUserLock(task.userId, async () => {
+      if (TasksRepo.get(task.id)?.status !== 'queued') return null;
+      if (!userCanRun(task.userId) || PlansRepo.get(task.planId)?.status !== 'active') {
+        TasksRepo.update(task.id, { status: 'queried', startedAt: null });
+        return null;
+      }
+      TasksRepo.update(task.id, { status: 'running', startedAt: new Date().toISOString(), attempts: task.attempts + 1 });
+      wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
       const ctx = await getContext(task.userId);
       const block = await findBlockingUnpaid(ctx, task.travelDate, task.trainNumber);
-      if (!block) return null;
+      if (!block) return purchaseTicketWithRetry(task, plan, passengers);
       const waitMs = block.payLimitTs
         ? block.payLimitTs - Date.now() + UNPAID_EXPIRY_BUFFER_MS
         : UNPAID_RETRY_FALLBACK_MS;
       const retryAt = new Date(Date.now() + Math.max(waitMs, 60_000)).toISOString();
-      TasksRepo.update(task.id, { status: 'queried', saleAt: retryAt, error: `等待未支付订单 ${block.orderNo}（${block.describe}）处理后再试`, finishedAt: new Date().toISOString() });
+      TasksRepo.update(task.id, { status: 'queried', attempts: task.attempts, saleAt: retryAt, error: `等待未支付订单 ${block.orderNo}（${block.describe}）处理后再试`, finishedAt: new Date().toISOString() });
       wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
       logger.info('存在未支付订单，延后购票', { taskId: task.id, blockingOrder: block.orderNo, describe: block.describe, retryAt });
-      return retryAt;
+      return null;
     });
-    if (deferred) return;
-
-    // 用户级串行：整个浏览器流程（查询/预热/点预订/提交）包在锁内，
-    // 同一 12306 会话绝不允许两个任务并行操作同一浏览器上下文。
-    const result = await withUserLock(task.userId, () =>
-      purchaseTicketWithRetry(task, plan, passengers),
-    );
+    if (!result) return;
 
     if (result.ok) {
       TasksRepo.update(task.id, {
@@ -553,9 +556,9 @@ async function runTask(task: Task): Promise<void> {
           paid: Boolean(result.paid),
           payDeadline: result.payDeadline,
         });
-        if (!notify.ok) logger.warn('查重命中但飞书通知失败', { taskId: task.id, orderNo: result.orderNo, error: notify.error });
+        if (!notify.ok) logger.warn('查重命中但通知失败', { taskId: task.id, orderNo: result.orderNo, error: notify.error });
       } else {
-        // 需求 5：成功不付款，飞书提醒用户付款
+        // 需求 5：成功不付款，消息提醒用户付款
         const notify = await notifyOrderSuccess({
           userId: task.userId,
           planName: plan.name,
@@ -569,7 +572,7 @@ async function runTask(task: Task): Promise<void> {
           logger.info('购票成功，已提醒用户付款', { taskId: task.id, orderNo: result.orderNo });
         } else {
           // 通知失败必须留痕：用户收不到提醒就不知道要付款，订单会超时取消
-          logger.error('购票成功但飞书通知失败', { taskId: task.id, orderNo: result.orderNo, error: notify.error });
+          logger.error('购票成功但通知失败', { taskId: task.id, orderNo: result.orderNo, error: notify.error });
         }
       }
       // 未支付订单（无论真实下单还是查重命中）：按支付截止时间定到点闹钟，
@@ -604,6 +607,7 @@ async function runTask(task: Task): Promise<void> {
       await notifyTaskFailed({ userId: task.userId, planName: plan.name, travelDate: task.travelDate, error: msg }).catch(() => undefined);
     }
   } finally {
+    wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
     runningLocks.delete(task.id);
     void getSessionState(task.userId);
   }
@@ -640,6 +644,8 @@ async function refreshForNewCalendarYear(year: number): Promise<void> {
 
 export function startScheduler(): void {
   if (scanTimer) return;
+  const interrupted = TasksRepo.recoverInterrupted();
+  if (interrupted) logger.warn('已标记上次运行中断的任务，请核对订单后手动重试', { count: interrupted });
   // 首次立即执行一次
   void scanPlans().then(() => void resolveSaleTimes());
   scanTimer = setInterval(() => void scanPlans(), 5 * 60 * 1000);

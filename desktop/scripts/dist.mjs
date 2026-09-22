@@ -1,0 +1,11 @@
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import signing from './signing.cjs';
+const desktop = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const mode = signing.signingMode(process.argv[2] || 'auto');
+const env = signing.buildEnvironment(mode);
+signing.validateSigning(mode, process.platform, env);
+const child = spawn(process.execPath, [path.join(desktop, 'node_modules/electron-builder/cli.js'), '--config', 'electron-builder.cjs', '--publish', 'never', ...process.argv.slice(3)], { cwd: desktop, env, stdio: 'inherit' });
+child.on('error', error => { console.error(error.message); process.exitCode = 1; });
+child.on('exit', code => { process.exitCode = code ?? 1; });

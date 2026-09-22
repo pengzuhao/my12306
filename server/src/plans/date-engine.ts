@@ -3,10 +3,7 @@
  *
  * 支持三种模式：
  *  - single   ：指定具体乘车日期（原样使用，不顺延，但会标注是否为工作日）
- *  - recurring：按工作周期推算（如"每周一"）。调休补班日计入工作周：若本周内
- *               目标周几之前存在调休补班日（自然周末被安排为工作日，如 9.20 周日补班），
- *               则以该补班日为本周首个工作日，提前触发；若推算日为法定节假日/调休休息日，
- *               则自动顺延到下一个工作日，并在结果中标注 postponed。
+ *  - recurring：固定自然周的星期，不调整节假日。
  *  - workweek ：工作周模式（按工作日历推算，不指定具体周几）。每周期（weekInterval
  *               周）内只生成一天：weekEdge='start' 取该周**首个工作日**（常态周一；
  *               若周一是法定节假日则顺延到下一个工作日；若自然周末被安排为调休补班，
@@ -19,7 +16,7 @@
  *
  * 输出"具体购票日期列表"，发生顺延的条目额外标注。
  */
-import { addDays, ensureYears, holidayName, isHoliday, isWorkday, nextWorkday, weekdayOf, isDateDegraded } from '../calendar/holidays.js';
+import { addDays, ensureYears, holidayName, isWorkday, weekdayOf, isDateDegraded } from '../calendar/holidays.js';
 import { DEFAULT_PRESALE_DAYS } from '../config.js';
 
 export interface DateEngineInput {
@@ -62,7 +59,7 @@ function yearsBetween(from: string, to: string): number[] {
   const a = Number(from.slice(0, 4));
   const b = Number(to.slice(0, 4));
   const out: number[] = [];
-  for (let y = Math.min(a, b); y <= Math.max(a, b) + 1; y++) out.push(y);
+  for (let y = Math.min(a, b); y <= Math.max(a, b); y++) out.push(y);
   return out;
 }
 
@@ -83,7 +80,13 @@ export async function computeDates(input: DateEngineInput, todayStr?: string, no
   // 节假日数据尽量就绪：拉取失败的年份会按自然周降级推算（isWorkday 兜底），
   // 并在条目上打 calendarPending 标记，提示"实际放假安排公布后会重算"。
   // 不再整体抛错——否则一个未来年份没数据，整个计划的推算/预览/任务生成都瘫痪。
-  const needed = yearsBetween(today, end);
+  // 只加载实际扫描范围及锚点附近的日历，不额外请求完全用不到的下一年。
+  const anchor = addDays(input.validFrom, -offset);
+  const needed = [...new Set([
+    ...yearsBetween(addDays(today, -7 - Math.abs(offset)), addDays(end, 7 + Math.abs(offset))),
+    ...yearsBetween(addDays(anchor, -7), addDays(anchor, 7)),
+    ...(input.travelDate ? [Number(input.travelDate.slice(0, 4))] : []),
+  ])];
   await ensureYears(needed);
 
   if (input.dateMode === 'single') {
@@ -103,70 +106,46 @@ export async function computeDates(input: DateEngineInput, todayStr?: string, no
   }
 
   if (input.dateMode === 'workweek') {
-    // 工作周模式：按工作日历推算，每周期只取首个/最后一个工作日。
-    //
-    // 周期锚点 = validFrom（用户指定的"开始日期"即该工作周的第一天；如调休补班日
-    // 9.20 周日补班，validFrom=9.20，则本周首个工作日就是 9.20，而不是去找周一）。
-    // 之后每隔 7*interval 天为一个周期。过去的日期按天过滤；若推算日恰好是今天，
-    // 还要看出发时间窗是否已错过——已错过则整个工作周跳过，从下个工作周开始
-    // （用户明确要求：时间已过就不应再买本周的票）。
+    // validFrom 是生效下限，不能把周三切成一个新工作周。
+    // 周一至周六属于同一工作周；紧邻周一的周日补班归入后一个工作周。
     const edge = input.weekEdge;
     if (edge !== 'start' && edge !== 'end') return [];
-    const interval = Math.max(1, Math.round(input.weekInterval ?? 1));
-    // 出发时间窗：判断"今天这班是否已经开走"。timeTo 优先，退化为 timeFrom。
-    const departDeadline = input.timeTo || input.timeFrom || null;
-
-    const step = 7 * interval;
-    // 锚点对齐到不早于今天的周期起点（validIf 早于今天时快进，保持节奏对齐）
-    let weekStart = input.validFrom;
-    if (weekStart < today) {
-      const skips = Math.floor((Date.parse(today) - Date.parse(weekStart)) / 86_400_000 / step);
-      weekStart = addDays(weekStart, skips * step);
+    const step = 7 * Math.max(1, Math.round(input.weekInterval ?? 1));
+    const departDeadline = input.timeTo || null;
+    const baseFrom = addDays(input.validFrom, -offset);
+    let weekStart = addDays(baseFrom, 1 - weekdayOf(baseFrom));
+    if (weekdayOf(baseFrom) === 7 && isWorkday(baseFrom)) weekStart = addDays(weekStart, 7);
+    function pickWeek(monday: string): { picked: string | null; naive: string } {
+      const sunday = addDays(monday, -1);
+      const from = isWorkday(sunday) ? sunday : monday;
+      const saturday = addDays(monday, 5);
+      let picked: string | null = null;
+      for (let d = from; d <= saturday; d = addDays(d, 1)) {
+        if (!isWorkday(d)) continue;
+        picked = d;
+        if (edge === 'start') break;
+      }
+      return { picked, naive: edge === 'start' ? monday : addDays(monday, 4) };
     }
+    // 先确定生效范围内的首个完整工作周目标，再固定每 N 周的节奏。
+    const lastWeek = addDays(end, Math.max(0, -offset) + 7);
+    while (weekStart <= lastWeek) {
+      const { picked } = pickWeek(weekStart);
+      if (picked && addDays(picked, offset) >= input.validFrom) break;
+      weekStart = addDays(weekStart, 7);
+    }
+    // 扫描日期推进时保持原始周期，保留相邻周期以容纳日期微调。
+    const skips = Math.max(0, Math.floor((Date.parse(today) - Date.parse(weekStart)) / 86_400_000 / step) - 1);
+    weekStart = addDays(weekStart, skips * step);
 
     const entries: DateEntry[] = [];
     let safety = 0;
-    while (weekStart <= end && safety < 600) {
+    while (weekStart <= lastWeek && safety < 600) {
       safety++;
-      const weekEnd = addDays(weekStart, 6);
-      let picked: string | null = null;
-      if (edge === 'start') {
-        // 首个工作日：从周期起点往后找第一个工作日
-        for (let d = weekStart; d <= weekEnd; d = addDays(d, 1)) {
-          if (isWorkday(d)) {
-            picked = d;
-            break;
-          }
-        }
-      } else {
-        // 最后一个工作日：从周期末尾往前找第一个工作日
-        for (let d = weekEnd; d >= weekStart; d = addDays(d, -1)) {
-          if (isWorkday(d)) {
-            picked = d;
-            break;
-          }
-        }
-      }
+      const { picked, naive } = pickWeek(weekStart);
       const nextStart = addDays(weekStart, step);
       if (picked) {
-        // 应用提前/延后偏移（负=提前，正=延后）
         const shifted = offset ? addDays(picked, offset) : picked;
-        // 常态目标日：不看节假日数据时，本周本该的首个/最后一个工作日（按自然周
-        // 周一至周五）。注意不能直接拿 weekStart 当常态日——用户锚点 validFrom
-        // 不一定是周一（如本例锚点是周六 9.19），那样首个工作日必然晚于锚点，
-        // 每个普通周都会被误判成"顺延"。
-        let naive: string | null = null;
-        if (edge === 'start') {
-          for (let d = weekStart; d <= weekEnd; d = addDays(d, 1)) {
-            const wd = weekdayOf(d);
-            if (wd >= 1 && wd <= 5) { naive = d; break; }
-          }
-        } else {
-          for (let d = weekEnd; d >= weekStart; d = addDays(d, -1)) {
-            const wd = weekdayOf(d);
-            if (wd >= 1 && wd <= 5) { naive = d; break; }
-          }
-        }
         // 只有实际取到的工作日晚于常态目标日，才是真正的节假日顺延；
         // 早于常态目标日（如周日补班成为本周首个工作日）属"提前"，不算顺延。
         const postponed = naive !== null && picked > naive;
@@ -210,20 +189,23 @@ export async function computeDates(input: DateEngineInput, todayStr?: string, no
   if (!target || target < 1 || target > 7) return [];
   const interval = Math.max(1, Math.round(input.weekInterval ?? 1));
 
-  let cursor = today < input.validFrom ? input.validFrom : today;
+  // 周期由生效范围内首个目标日锚定，不能随着今天推进而重新对齐隔周节奏。
+  let cursor = addDays(input.validFrom, -offset);
   // 对齐到第一个目标星期
   let guard = 0;
   while (weekdayOf(cursor) !== target && guard < 8) {
     cursor = addDays(cursor, 1);
     guard++;
   }
+  const skippedCycles = Math.max(0, Math.floor((Date.parse(today) - Date.parse(addDays(cursor, offset))) / 86_400_000 / (7 * interval)));
+  cursor = addDays(cursor, skippedCycles * 7 * interval);
 
   const entries: DateEntry[] = [];
   let safety = 0;
-  while (cursor <= end && safety < 400) {
+  while (addDays(cursor, offset) <= end && safety < 400) {
     safety++;
     const shifted = offset ? addDays(cursor, offset) : cursor;
-    if (shifted >= today && shifted <= end) {
+    if (shifted >= today && shifted >= input.validFrom && shifted <= end) {
       const parts: string[] = [];
       if (offset) parts.push(offset < 0 ? `提前 ${-offset} 天：${cursor} → ${shifted}` : `延后 ${offset} 天：${cursor} → ${shifted}`);
       const pending = isDateDegraded(shifted);

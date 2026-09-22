@@ -4,9 +4,9 @@
  * 原来由独立的「12306 会话」页承载，现已融合进仪表盘；登录二维码弹窗由
  * LayoutView 渲染（WS 推送的二维码在任何页面都能弹出）。
  */
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { ElMessage } from 'element-plus';
-import { sessionApi } from '../api';
+import { sessionApi, type QrSnapshot } from '../api';
 
 export const sessionState = ref<Record<string, unknown>>({});
 export const sessionLoading = ref(false);
@@ -15,41 +15,80 @@ export const sessionSyncing = ref(false);
 export const qrVisible = ref(false);
 export const qrImage = ref('');
 export const qrStatus = ref('请使用 12306 APP 扫码登录');
-
+export const qrPhase = ref<QrSnapshot['phase']>('loading');
+export const qrAutoRefresh = ref(true);
+export const qrOptionsBusy = ref(false);
+const qrRequestBusy = ref(false);
+export const qrRefreshBusy = computed(() => qrRequestBusy.value || ['loading', 'refreshing'].includes(qrPhase.value));
+let attemptId: string | null = null;
+let revision = -1;
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+let starting: Promise<QrSnapshot> | null = null;
+function stopPolling() { if (pollTimer) clearTimeout(pollTimer); pollTimer = null; }
 function errMsg(e: unknown): string | undefined {
   return (e as { response?: { data?: { error?: string } } }).response?.data?.error;
 }
-
 export async function loadSessionState(): Promise<void> {
-  try {
-    sessionState.value = await sessionApi.state();
-  } catch {
-    // 后端未绑定 12306 等情况，忽略
-  }
+  try { sessionState.value = await sessionApi.state(); } catch { /* retain last state during reconnect */ }
 }
-
-/** 发起扫码登录：接口立即返回，二维码由 WS 推送到 qrImage */
+function setQrError(message: string) {
+  qrPhase.value = 'error'; qrImage.value = ''; qrStatus.value = message; sessionLoading.value = false; stopPolling();
+}
+function pollQr(id: string) {
+  stopPolling();
+  if (id !== attemptId || !qrVisible.value || ['error', 'success', 'cancelled'].includes(qrPhase.value)) return;
+  pollTimer = setTimeout(async () => {
+    try { handleQrCode(await sessionApi.qr(id)); }
+    catch (error) {
+      if (id !== attemptId || !qrVisible.value) return;
+      const status = (error as { response?: { status?: number } }).response?.status;
+      if (status === 404) setQrError('登录已结束，请刷新二维码重新开始');
+      else qrStatus.value = '连接暂时中断，正在重新获取二维码状态…';
+    }
+    pollQr(id);
+  }, 2000);
+}
+/** IDs plus revisions reject late HTTP/WS responses from a cancelled or older attempt. */
 export async function startLogin(): Promise<void> {
-  sessionLoading.value = true;
-  qrStatus.value = '正在打开 12306 登录页…';
-  qrImage.value = '';
-  qrVisible.value = true;
-  try {
-    await sessionApi.login();
-    ElMessage.info('正在生成二维码，请稍候');
-  } catch (e) {
-    ElMessage.error(errMsg(e) ?? '登录发起失败');
-    sessionLoading.value = false;
-    qrVisible.value = false;
-  }
+  if (qrVisible.value && !['error', 'cancelled'].includes(qrPhase.value)) return;
+  const id = globalThis.crypto?.randomUUID?.() ?? `qr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  attemptId = id; revision = -1; stopPolling();
+  sessionLoading.value = true; qrPhase.value = 'loading'; qrImage.value = '';
+  qrStatus.value = '正在打开 12306 登录页…'; qrVisible.value = true;
+  qrRequestBusy.value = false; qrOptionsBusy.value = false;
+  const request = sessionApi.login(id, qrAutoRefresh.value);
+  starting = request;
+  try { handleQrCode(await request); if (id === attemptId && qrVisible.value) pollQr(id); }
+  catch (error) { if (id === attemptId && qrVisible.value) setQrError(errMsg(error) ?? '登录发起失败，请刷新二维码重试'); }
+  finally { if (starting === request) starting = null; }
 }
-
-/** 取消扫码登录 */
+export async function refreshQr(): Promise<void> {
+  if (!qrVisible.value || qrRefreshBusy.value || qrPhase.value === 'scanned') return;
+  if (qrPhase.value === 'error') { await startLogin(); return; }
+  const id = attemptId;
+  if (!id) return;
+  qrRequestBusy.value = true;
+  try { handleQrCode(await sessionApi.refreshQr(id)); }
+  catch (error) { if (id === attemptId && qrVisible.value) ElMessage.warning(errMsg(error) ?? '刷新请求失败，请重试'); }
+  finally { if (id === attemptId) qrRequestBusy.value = false; }
+}
+export async function changeQrAutoRefresh(value: string | number | boolean): Promise<void> {
+  const enabled = Boolean(value), id = attemptId;
+  if (!id || qrOptionsBusy.value) return;
+  if (qrPhase.value === 'error') { qrAutoRefresh.value = enabled; return; }
+  qrOptionsBusy.value = true;
+  try { handleQrCode(await sessionApi.qrOptions(id, enabled)); }
+  catch (error) { if (id === attemptId && qrVisible.value) ElMessage.warning(errMsg(error) ?? '设置失败，请重试'); }
+  finally { if (id === attemptId) qrOptionsBusy.value = false; }
+}
+/** Hide immediately. If start is still in flight, cancel again after it is registered server-side. */
 export async function cancelLogin(): Promise<void> {
-  await sessionApi.cancelLogin().catch(() => undefined);
-  qrVisible.value = false;
-  sessionLoading.value = false;
-  ElMessage.info('已取消登录');
+  const id = attemptId, pending = starting;
+  attemptId = null; qrVisible.value = false; qrImage.value = ''; qrPhase.value = 'cancelled';
+  sessionLoading.value = false; qrRequestBusy.value = false; qrOptionsBusy.value = false; stopPolling();
+  if (!id) return;
+  await pending?.catch(() => undefined);
+  await sessionApi.cancelLogin(id).catch(() => undefined);
 }
 
 /** 立即检查会话是否仍然有效 */
@@ -86,25 +125,24 @@ export async function doLogout(): Promise<void> {
   ElMessage.info('已退出 12306 登录');
 }
 
-/** WS 推送二维码时调用 */
-export function handleQrCode(m: { image?: string; status?: string }): void {
-  if (m?.image) {
-    qrImage.value = m.image;
-    qrStatus.value = m.status ?? '请使用 12306 APP 扫码登录';
-    qrVisible.value = true;
-  }
+/** Polling backs up WebSocket delivery; images never reopen a dismissed dialog. */
+export function handleQrCode(snapshot: QrSnapshot): void {
+  if (!qrVisible.value || snapshot.attemptId !== attemptId || snapshot.revision < revision) return;
+  revision = snapshot.revision;
+  qrImage.value = snapshot.image ?? ''; qrStatus.value = snapshot.status;
+  qrPhase.value = snapshot.phase; qrAutoRefresh.value = snapshot.autoRefresh;
+  if (['error', 'cancelled', 'success'].includes(snapshot.phase)) { sessionLoading.value = false; stopPolling(); }
+  if (snapshot.phase === 'success') { qrVisible.value = false; attemptId = null; void loadSessionState(); }
 }
-
-/** 登录结果由 WS session 消息驱动：收到后刷新状态并解除 loading */
 export function handleSessionUpdate(m: unknown): void {
-  sessionState.value = m as Record<string, unknown>;
-  if (sessionState.value.loggedIn) {
-    sessionLoading.value = false;
-    qrVisible.value = false;
-    ElMessage.success('12306 登录成功，会话已保存并保活');
-  } else if (sessionState.value.failReason) {
-    sessionLoading.value = false;
-    qrVisible.value = false;
-    ElMessage.error(String(sessionState.value.failReason));
+  const state = m as Record<string, unknown>;
+  if (state.loginAttemptId && state.loginAttemptId !== attemptId && !state.loggedIn) return;
+  sessionState.value = state;
+  if (state.loggedIn) {
+    const wasLoggingIn = qrVisible.value;
+    sessionLoading.value = false; qrVisible.value = false; qrImage.value = ''; attemptId = null; stopPolling();
+    if (wasLoggingIn) ElMessage.success('12306 登录成功，会话已保存并保活');
+  } else if (state.failReason && qrVisible.value && state.loginAttemptId === attemptId) {
+    setQrError(String(state.failReason));
   }
 }

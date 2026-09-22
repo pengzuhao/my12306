@@ -1,0 +1,22 @@
+# Copy to /etc/systemd/system/my12306.service after replacing these paths/user.
+[Unit]
+Description=my12306 ticket service
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=my12306
+WorkingDirectory=/opt/my12306
+ExecStart=/usr/bin/node /opt/my12306/server/dist/index.js
+Environment=NODE_ENV=production
+Environment=MY12306_HOST=127.0.0.1
+Environment=MY12306_PORT=7788
+Environment=MY12306_DATA_DIR=/var/lib/my12306
+EnvironmentFile=-/etc/my12306.env
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=mixed
+UMask=0077
+[Install]
+WantedBy=multi-user.target

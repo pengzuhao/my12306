@@ -76,12 +76,16 @@ export async function createContextForUser(opts: LaunchOptions): Promise<Browser
   }
 
   // 先启动一次拿到真实 Chromium 版本，避免 UA 与实际版本不匹配被 12306 风控拦截
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({ handleSIGINT: false, handleSIGTERM: false });
   const chromeVersion = browser.version();
   await browser.close();
-  const ua = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
+  const platformUA = process.platform === 'win32' ? 'Windows NT 10.0; Win64; x64' : process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64';
+  const ua = `Mozilla/5.0 (${platformUA}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
 
   const context = await chromium.launchPersistentContext(profileDir, {
+    // 由应用退出钩子先保存登录态，再关闭浏览器。
+    handleSIGINT: false,
+    handleSIGTERM: false,
     headless,
     viewport: { width: 1440, height: 900 },
     locale: 'zh-CN',

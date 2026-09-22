@@ -1,0 +1,22 @@
+{
+  "name": "my12306-desktop-tools",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "prepare:app": "node scripts/prepare.mjs",
+    "start": "node scripts/run.mjs",
+    "pack": "electron-builder --config electron-builder.cjs --dir",
+    "dist": "node scripts/dist.mjs auto",
+    "smoke": "node scripts/smoke.mjs",
+    "dist:unsigned": "node scripts/dist.mjs unsigned",
+    "dist:signed": "node scripts/dist.mjs signed",
+    "test:signing": "node --test scripts/signing.test.cjs",
+    "test:window": "node --test scripts/window-mode.test.cjs",
+    "test:quarantine": "node --test scripts/quarantine.test.cjs",
+    "bundle:macos": "node scripts/bundle-macos.mjs"
+  },
+  "devDependencies": {
+    "electron": "44.4.3",
+    "electron-builder": "26.15.3"
+  }
+}

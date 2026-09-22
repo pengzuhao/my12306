@@ -18,8 +18,11 @@ body,
   align-items: center;
   justify-content: space-between;
   padding: 0 20px;
-  background: #001529;
-  color: #fff;
+  background: #fff;
+  border-bottom: 1px solid #e7ecf3;
+  height: 72px;
+  flex-shrink: 0;
+  color: #19324f;
 }
 
 .app-header .logo {
@@ -78,3 +81,38 @@ body,
 .tag-postponed {
   margin-left: 6px;
 }
+
+/* 窄屏仍保留完整操作入口，表格在容器内横向滚动。 */
+.app-layout > .el-container, .app-main { min-width: 0; min-height: 0; }
+.el-dialog { max-width: calc(100vw - 24px); }
+.realtime-state { font-size: 12px; color: #a6c5dc; }
+@media (max-width: 760px) {
+  .app-header { height: auto; min-height: 60px; flex-wrap: wrap; gap: 10px; padding: 12px; }
+  .account-box { flex-wrap: wrap; gap: 6px; }
+  .app-layout > .el-container { flex-direction: column; }
+  .app-aside { width: 100% !important; }
+  .app-aside .el-menu { display: flex; overflow-x: auto; }
+  .app-aside .el-menu-item { padding: 0 12px; height: 44px; line-height: 44px; flex-shrink: 0; }
+  .app-main { padding: 10px; }
+  .el-dialog .el-form-item__label { width: 84px !important; }
+  .el-dialog .el-form-item__content { min-width: 0; }
+  .el-dialog .el-date-editor.el-input { max-width: 100%; }
+}
+
+.page-heading{ display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 8px 0 24px; flex-wrap: wrap; }
+.page-heading h1{ color: #243e5b; font-size: 22px; margin: 0 0 8px; font-weight: 600; }
+.page-heading p,.form-hint{ color: #8792a3; font-size: 13px; margin: 0; line-height: 1.8; }
+.page-card{ border-radius: 10px; border-color: #e8edf4; box-shadow: 0 2px 8px #1e365008; }
+.app-aside .el-menu { border-right: 0; }
+.app-aside .el-menu-item.is-active{ background: #edf3fd; color: #3566b0; }
+
+/* Keep close/save reachable even when the plan form or inventory is long. */
+.plan-editor-dialog { display: flex; flex-direction: column; max-height: 92dvh; margin-bottom: 0; }
+.plan-editor-dialog > .el-dialog__header,
+.plan-editor-dialog > .el-dialog__footer { flex-shrink: 0; }
+.plan-editor-dialog > .el-dialog__body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: 8px; }
+.plan-editor-dialog > .el-dialog__footer { padding-top: 16px; border-top: 1px solid #edf0f5; }
+
+.plan-editor-dialog .el-form-item__content { min-width: 0; }
+.train-picker-dialog > .el-dialog__body { display: flex; flex-direction: column; overflow: hidden; }
+.train-picker-dialog .train-panel-bar { flex-shrink: 0; }

@@ -1,0 +1,77 @@
+name: Desktop installers
+on:
+  workflow_dispatch:
+    inputs:
+      signing:
+        description: '安装包签名模式（unsigned 无需证书，signed 需要签名和公证凭据）'
+        type: choice
+        default: unsigned
+        options: [unsigned, signed]
+  push:
+    tags: ['desktop-v*']
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+          - os: macos-15-intel
+            arch: x64
+          - os: windows-2025
+            arch: x64
+    env:
+      DESKTOP_SIGNING: ${{ github.event_name == 'workflow_dispatch' && inputs.signing || vars.DESKTOP_SIGNING || 'unsigned' }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+            desktop/app/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run desktop:install
+      - run: npm run desktop:prepare
+      - run: npm --prefix desktop run smoke
+      - run: npm --prefix desktop run test:signing
+      - run: npm --prefix desktop run test:window
+      - if: runner.os == 'macOS'
+        run: npm --prefix desktop run test:quarantine
+      - run: node desktop/scripts/dist.mjs "$DESKTOP_SIGNING"
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      - run: npm --prefix desktop run smoke -- --packaged
+      - if: runner.os == 'macOS' && env.DESKTOP_SIGNING == 'unsigned'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - if: runner.os == 'macOS' && env.DESKTOP_SIGNING == 'unsigned'
+        run: npm --prefix desktop run bundle:macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: my12306-${{ runner.os }}-${{ matrix.arch }}-${{ env.DESKTOP_SIGNING }}
+          path: |
+            desktop/release/*.dmg
+            desktop/release/*.zip
+            desktop/release/*.exe
+            desktop/release/*.blockmap
+            desktop/release/*-bundle.zip.sha256
+          if-no-files-found: error

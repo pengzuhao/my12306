@@ -64,19 +64,19 @@ export const SELECTORS = {
   sliderBar: '#nc_1__scale_text',
 } as const;
 
-/** leftTicket 结果字符串中各席别的字段下标（queryZ 通用格式，2026-09-18 实测） */
+/** 对照 12306 官方 queryLeftTicket_end_js.js 的 queryLeftNewDTO 映射（2026-09-22）。 */
 export const SEAT_INDEX: Record<string, number> = {
-  QT: 17, // 其他
-  SWZ: 20, // 商务座（一等包厢）
-  TZ: 21, // 特等座
-  ZY: 22, // 一等座
-  ZE: 23, // 二等座
-  GR: 24, // 高级软卧
-  RW: 25, // 软卧
-  YW: 26, // 硬卧
-  RZ: 27, // 软座
-  YZ: 28, // 硬座
-  WZ: 29, // 无座
+  GR: 21,
+  QT: 22,
+  RW: 23,
+  RZ: 24,
+  TZ: 25,
+  WZ: 26,
+  YW: 28,
+  YZ: 29,
+  ZE: 30,
+  ZY: 31,
+  SWZ: 32,
 };
 
 export const SEAT_NAMES: Record<string, string> = {

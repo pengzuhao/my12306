@@ -33,3 +33,6 @@ export const RAILWAY = {
   STATION_NAME_JS: 'https://kyfw.12306.cn/otn/resources/js/framework/station_name.js',
   HOME_URL: 'https://kyfw.12306.cn/otn/index/init',
 } as const;
+
+/** 启动时选择管理员多用户模式；默认仍为本地单用户。 */
+export const MULTI_USER = process.env.MY12306_MULTI_USER === '1';

@@ -1,7 +1,8 @@
+import bcrypt from 'bcryptjs';
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
-import { DB_PATH, DATA_DIR, SYSTEM_USER_ID } from '../config.js';
+import { DB_PATH, DATA_DIR, SYSTEM_USER_ID, MULTI_USER } from '../config.js';
 
 // 注意：本模块不依赖 Logger（Logger 反向依赖 db 写日志），否则会产生循环初始化。
 // DB 层自身日志直接走控制台。
@@ -42,7 +43,8 @@ export function applySchema(): void {
   addPlansOffsetDaysColumn();
   addPlansAllowNoSeatColumn();
   addPlansSeatTypesColumn();
-  migrateToSingleUser();
+  if (!(db.prepare('PRAGMA table_info(plans)').all() as Array<{ name: string }>).some(c => c.name === 'train_segments')) db.exec("ALTER TABLE plans ADD COLUMN train_segments TEXT NOT NULL DEFAULT '[]'");
+  if (!(db.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>).some(c => c.name === 'disabled')) db.exec('ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0');
   log('数据库 schema 已应用');
 }
 
@@ -157,48 +159,18 @@ function addPlansSeatTypesColumn(): void {
   log('已为 plans 增加 seat_types 列（席别，老计划默认二等座）');
 }
 
-/**
- * 兼容迁移：单用户模式。把所有历史用户的数据（plans/tasks/passengers/feishu_configs/
- * railway_accounts/logs）统一归并到内置用户 SYSTEM_USER_ID，并删除旧用户行。
- * 幂等：没有非内置用户时什么都不做。
- */
-function migrateToSingleUser(): void {
-  const db = getDb();
-  const rows = db.prepare(`SELECT id FROM users WHERE id != ?`).all(SYSTEM_USER_ID) as Array<{ id: string }>;
-  if (!rows.length) return;
-  const legacyIds = rows.map((r) => r.id);
-  // 必须先把内置用户行建出来，否则外键约束会阻止 user_id 改指向它
-  db.prepare(
-    'INSERT INTO users (id, username, password_hash, role, display_name) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING',
-  ).run(SYSTEM_USER_ID, SYSTEM_USER_ID, '(disabled)', 'admin', '内置用户');
-  const tables = ['plans', 'tasks', 'passengers', 'feishu_configs', 'railway_accounts', 'logs'];
-  const tx = db.transaction((ids: string[]) => {
-    // 先清空内置用户的存量行：这些表对 user_id 有唯一约束
-    // （feishu_configs.user_id UNIQUE），旧用户数据改归属过来会撞约束
-    for (const t of tables) {
-      db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(SYSTEM_USER_ID);
-    }
-    // 多个旧用户可能各有 feishu_configs 行（user_id UNIQUE），
-    // 直接 UPDATE 会互相撞唯一约束：先全部置空再统一改归属
-    for (const id of ids) {
-      for (const t of tables) {
-        // logs.user_id 可空，其余均 NOT NULL；统一改归属到内置用户
-        db.prepare(`UPDATE OR REPLACE ${t} SET user_id = ? WHERE user_id = ?`).run(SYSTEM_USER_ID, id);
-      }
-      db.prepare('DELETE FROM users WHERE id = ?').run(id);
-    }
-  });
-  tx(legacyIds);
-  log(`已迁移 ${legacyIds.length} 个历史用户的数据到内置用户（单用户模式）`, { ids: legacyIds });
-}
-
-/** 初始化内置用户（单用户模式：固定 ID、无密码、不可登录） */
+/** 保留所有用户数据，切换模式仅改变访问方式。 */
 export function seedAdmin(): void {
   const db = getDb();
-  const row = db.prepare('SELECT id FROM users WHERE id = ?').get(SYSTEM_USER_ID);
-  if (row) return;
-  db.prepare(
-    'INSERT INTO users (id, username, password_hash, role, display_name) VALUES (?, ?, ?, ?, ?)',
-  ).run(SYSTEM_USER_ID, SYSTEM_USER_ID, '(disabled)', 'admin', '内置用户');
-  log('已创建内置用户（单用户模式，无登录）');
+  db.prepare("INSERT INTO users (id, username, password_hash, role, display_name) VALUES (?, ?, '(disabled)', 'admin', '本地用户') ON CONFLICT(id) DO NOTHING").run(SYSTEM_USER_ID, SYSTEM_USER_ID);
+  if (!MULTI_USER) return;
+  const existing = db.prepare("SELECT id FROM users WHERE role = 'admin' AND disabled = 0 AND password_hash != '(disabled)'").get();
+  if (existing) return;
+  const username = process.env.MY12306_ADMIN_USER || 'admin';
+  const password = process.env.MY12306_ADMIN_PASSWORD || '';
+  if (!/^[a-zA-Z0-9_.-]{3,40}$/.test(username) || password.length < 12 || Buffer.byteLength(password) > 72) {
+    throw new Error('首次启用多用户模式请设置 MY12306_ADMIN_USER（3–40 位字母数字）和 MY12306_ADMIN_PASSWORD（至少 12 字符，最多 72 字节）');
+  }
+  db.prepare("UPDATE users SET username = ?, password_hash = ?, role = 'admin', disabled = 0, display_name = '管理员' WHERE id = ?").run(username, bcrypt.hashSync(password, 12), SYSTEM_USER_ID);
+  log('管理员已初始化，现有数据及 12306 会话已保留');
 }

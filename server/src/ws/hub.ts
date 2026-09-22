@@ -18,6 +18,20 @@ type WsMessage =
  */
 class WsHubImpl {
   private clients = new Set<WebSocket>();
+  private subscribers = new Set<{ userId: string; send: (message: WsMessage) => void }>();
+
+  subscribe(userId: string, send: (message: WsMessage) => void): () => void {
+    const subscriber = { userId, send };
+    this.subscribers.add(subscriber);
+    return () => { this.subscribers.delete(subscriber); };
+  }
+
+  private publish(message: WsMessage, userId?: string): void {
+    for (const subscriber of this.subscribers) {
+      if (userId && subscriber.userId !== userId) continue;
+      try { subscriber.send(message); } catch { this.subscribers.delete(subscriber); }
+    }
+  }
 
   add(ws: WebSocket): void {
     this.clients.add(ws);
@@ -25,15 +39,20 @@ class WsHubImpl {
     ws.on('error', () => this.clients.delete(ws));
   }
 
+  disconnectUser(userId: string): void {
+    for (const ws of this.clients) if ((ws as WebSocket & { userId?: string }).userId === userId) ws.close(1008, '请重新登录');
+  }
+
   remove(ws: WebSocket): void {
     this.clients.delete(ws);
   }
 
   size(): number {
-    return this.clients.size;
+    return this.clients.size + this.subscribers.size;
   }
 
   broadcast(message: WsMessage): void {
+    this.publish(message);
     if (!this.clients.size) return;
     const data = JSON.stringify(message);
     for (const ws of this.clients) {
@@ -49,6 +68,7 @@ class WsHubImpl {
 
   /** 仅推送给指定用户的管理台连接 */
   broadcastToUser(userId: string, message: WsMessage): void {
+    this.publish(message, userId);
     if (!this.clients.size) return;
     const data = JSON.stringify({ ...message, _userId: userId });
     for (const ws of this.clients) {

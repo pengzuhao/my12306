@@ -10,8 +10,8 @@ export default defineConfig({
   server: {
     port: 7789,
     proxy: {
-      '/api': { target: 'http://127.0.0.1:7788', changeOrigin: true },
-      '/ws': { target: 'ws://127.0.0.1:7788', ws: true, changeOrigin: true },
+      '/api': { target: 'http://127.0.0.1:7788', changeOrigin: false },
+      '/ws': { target: 'ws://127.0.0.1:7788', ws: true, changeOrigin: false },
     },
   },
   build: {

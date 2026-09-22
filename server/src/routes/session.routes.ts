@@ -9,7 +9,10 @@ import { Logger } from '../logger.js';
 import { wsHub } from '../ws/hub.js';
 import {
   getSessionState,
-  loginInteractive,
+  startQrLogin,
+  getQrLogin,
+  refreshQrLogin,
+  setQrAutoRefresh,
   cancelQrLogin,
   closeSession,
   checkLoggedIn,
@@ -21,8 +24,8 @@ const logger = new Logger('session');
 
 export const sessionRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, done) => {
   /** 会话状态 */
-  app.get('/api/session', async () => {
-    const user = currentUser();
+  app.get('/api/session', async (request) => {
+    const user = currentUser(request);
     return getSessionState(user.id);
   });
 
@@ -31,26 +34,46 @@ export const sessionRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts
    * 异步：立即返回"已发起"，浏览器在后台打开扫码页并把二维码通过 WS（qr_code 消息）推送。
    * 用户在管理台扫码确认后，登录结果通过 session 消息推送，前端不阻塞等待此 HTTP 响应。
    */
-  app.post('/api/session/login', async () => {
-    const user = currentUser();
-    // 异步发起，不阻塞 HTTP；并发重复登录由 loginInteractive 内部锁拦截
-    void loginInteractive(user.id).catch((e) => {
-      const msg = e instanceof Error ? e.message : String(e);
-      logger.warn('登录失败', { by: user.username, error: msg });
-    });
-    return { ok: true, status: 'logging_in', message: '二维码即将显示，请使用 12306 APP 扫码登录' };
+  const attemptSchema = z.object({ attemptId: z.string().regex(/^[a-zA-Z0-9-]{8,80}$/) });
+  app.post('/api/session/login', async (request, reply) => {
+    const user = currentUser(request);
+    const parsed = attemptSchema.extend({ autoRefresh: z.boolean().default(true) }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: '登录请求参数无效，请刷新管理台页面重试' });
+    try { return startQrLogin(user.id, parsed.data.attemptId, parsed.data.autoRefresh); }
+    catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : '登录正在进行中' }); }
   });
-
-  /** 取消扫码登录 */
-  app.post('/api/session/cancel-login', async () => {
-    const user = currentUser();
-    cancelQrLogin(user.id);
+  app.get('/api/session/qr', async (request, reply) => {
+    const parsed = attemptSchema.safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ error: '登录请求参数无效' });
+    const snapshot = getQrLogin(currentUser(request).id, parsed.data.attemptId);
+    if (!snapshot) return reply.code(404).send({ error: '登录已结束，请刷新二维码重新开始' });
+    reply.header('Cache-Control', 'no-store');
+    return snapshot;
+  });
+  app.post('/api/session/refresh-qr', async (request, reply) => {
+    const parsed = attemptSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: '登录请求参数无效' });
+    const user = currentUser(request);
+    if (!refreshQrLogin(user.id, parsed.data.attemptId)) return reply.code(409).send({ error: '当前无法刷新，请等待二维码生成或在手机上确认登录' });
+    return getQrLogin(user.id, parsed.data.attemptId);
+  });
+  app.post('/api/session/qr-options', async (request, reply) => {
+    const parsed = attemptSchema.extend({ autoRefresh: z.boolean() }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: '登录请求参数无效' });
+    const user = currentUser(request);
+    if (!setQrAutoRefresh(user.id, parsed.data.attemptId, parsed.data.autoRefresh)) return reply.code(409).send({ error: '登录已结束' });
+    return getQrLogin(user.id, parsed.data.attemptId);
+  });
+  app.post('/api/session/cancel-login', async (request, reply) => {
+    const parsed = attemptSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: '登录请求参数无效' });
+    cancelQrLogin(currentUser(request).id, parsed.data.attemptId);
     return { ok: true };
   });
 
   /** 主动检查一次会话有效性 */
-  app.post('/api/session/check', async () => {
-    const user = currentUser();
+  app.post('/api/session/check', async (request) => {
+    const user = currentUser(request);
     const ctx = await getContext(user.id).catch(() => null);
     if (!ctx) {
       // 浏览器起不来也必须把状态标成失活，否则前端一直显示"已连接"
@@ -70,15 +93,15 @@ export const sessionRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts
   });
 
   /** 退出登录 */
-  app.post('/api/session/logout', async () => {
-    const user = currentUser();
+  app.post('/api/session/logout', async (request) => {
+    const user = currentUser(request);
     await closeSession(user.id);
     return { ok: true };
   });
 
   /** 从 12306 同步常用联系人（登录后可用） */
   app.post('/api/session/sync-passengers', async (request, reply) => {
-    const user = currentUser();
+    const user = currentUser(request);
     const acc = RailwayAccountRepo.get(user.id);
     if (!acc || acc.status !== 'active') return reply.code(400).send({ error: '12306 未登录，请先在会话页登录' });
     const ctx = await getContext(user.id);

@@ -1,8 +1,12 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { useRouter } from 'vue-router';
-import { metaApi, planApi, sessionApi, type TrainOption } from '../api';
+import { metaApi, planApi, type TrainOption } from '../api';
+
+import { sessionState } from '../store/session';
+import { todayCn, isPastDate } from '../utils/time';
+import { trainSearchErrorMessage } from '../utils/train-query-error';
 
 const router = useRouter();
 
@@ -10,21 +14,28 @@ const router = useRouter();
 const form = reactive({
   from: '',
   to: '',
-  date: new Date().toISOString().slice(0, 10),
+  date: todayCn(),
 });
-
-/** 今天（日期选择器最小值，不能查过去的票） */
-const today = new Date().toISOString().slice(0, 10);
 
 const loading = ref(false);
 const trains = ref<TrainOption[]>([]);
 /** 12306 是否已登录（未登录时给引导） */
-const loggedIn = ref(false);
+const loggedIn = computed(() => !!sessionState.value.loggedIn);
+const searched = ref(false);
+const searchError = ref('');
+let searchVersion = 0;
+watch(() => [form.from, form.to, form.date], () => {
+  searchVersion++;
+  trains.value = [];
+  searched.value = false;
+  searchError.value = '';
+  loading.value = false;
+}, { flush: 'sync' });
 
 /** 余票文本 → 颜色：有票绿、无票灰 */
 function seatColor(text: string | undefined): string {
   if (!text || text === '无' || text === '') return '#c0c4cc';
-  if (text === '有' || text === '*') return '#67c23a';
+  if (text === '有') return '#67c23a';
   const n = Number(text);
   return Number.isFinite(n) && n > 0 ? '#67c23a' : '#c0c4cc';
 }
@@ -39,18 +50,20 @@ async function searchStations(keyword: string, cb: (items: Array<{ value: string
   }
 }
 
-async function checkLogin(): Promise<void> {
-  try {
-    const state = (await sessionApi.state()) as { loggedIn?: boolean };
-    loggedIn.value = !!state.loggedIn;
-  } catch {
-    loggedIn.value = false;
-  }
-}
-
 async function search(): Promise<void> {
+  if (loading.value) return;
+  form.from = form.from.trim();
+  form.to = form.to.trim();
   if (!form.from || !form.to) {
     ElMessage.warning('请填写出发站和到达站');
+    return;
+  }
+  if (form.from === form.to) {
+    ElMessage.warning('出发站和到达站不能相同');
+    return;
+  }
+  if (form.date && form.date < todayCn()) {
+    ElMessage.warning('不能查询过去日期的车次');
     return;
   }
   if (!form.date) {
@@ -61,9 +74,14 @@ async function search(): Promise<void> {
     ElMessage.warning('请先在顶栏扫码登录 12306 后再查询车次');
     return;
   }
+  const version = ++searchVersion;
   loading.value = true;
+  searchError.value = '';
+  searched.value = true;
+  trains.value = [];
   try {
     const res = await metaApi.trains(form.from, form.to, form.date);
+    if (version !== searchVersion) return;
     trains.value = res.trains;
     if (!res.trains.length) {
       ElMessage.warning('该日期/区间暂无可查车次（可能未到预售期或无直达车）');
@@ -71,10 +89,11 @@ async function search(): Promise<void> {
       ElMessage.success(`查到 ${res.trains.length} 趟车次`);
     }
   } catch (e) {
+    if (version !== searchVersion) return;
     trains.value = [];
-    ElMessage.error((e as { response?: { data?: { error?: string } } }).response?.data?.error ?? '车次查询失败');
+    searchError.value = trainSearchErrorMessage(e);
   } finally {
-    loading.value = false;
+    if (version === searchVersion) loading.value = false;
   }
 }
 
@@ -89,12 +108,11 @@ function swapStations(): void {
 function newPlanWithTrain(t: TrainOption): void {
   router.push({
     path: '/plans',
-    query: { from: form.from, to: form.to, date: form.date, train: t.trainCode },
+    query: { from: t.fromStation, to: t.toStation, date: form.date, train: t.trainCode },
   });
 }
 
 onMounted(async () => {
-  await checkLogin();
   // 从购票计划页带过来的查询条件
   const q = router.currentRoute.value.query;
   if (q.from) form.from = String(q.from);
@@ -119,7 +137,7 @@ onMounted(async () => {
       title="12306 未登录，车次查询需要先登录。请在右上角「扫码登录」后重试。"
     />
 
-    <el-form :inline="true" class="search-form">
+    <el-form :inline="true" class="search-form" @submit.prevent="search">
       <el-form-item label="出发站">
         <el-autocomplete
           v-model="form.from"
@@ -144,13 +162,16 @@ onMounted(async () => {
         />
       </el-form-item>
       <el-form-item label="乘车日期">
-        <el-date-picker v-model="form.date" type="date" value-format="YYYY-MM-DD" :disabled-date="(d: Date) => d < new Date(today)" placeholder="选择日期" style="width: 160px" />
+        <el-date-picker v-model="form.date" type="date" value-format="YYYY-MM-DD" :disabled-date="isPastDate" placeholder="选择日期" style="width: 160px" />
       </el-form-item>
       <el-form-item>
-        <el-button type="primary" :loading="loading" @click="search">查询车次</el-button>
+        <el-button type="primary" :loading="loading" native-type="submit">查询车次</el-button>
       </el-form-item>
     </el-form>
 
+    <el-alert v-if="searchError" :title="searchError" type="error" :closable="false" show-icon style="margin-bottom: 12px" />
+    <p v-if="loading" role="status">正在查询 12306 实时余票，请稍候…</p>
+    <p v-if="trains.length" class="sub-hint">共 {{ trains.length }} 趟车次 · {{ form.from }} → {{ form.to }} · {{ form.date }}</p>
     <el-table
       v-if="trains.length"
       :data="trains"
@@ -185,7 +206,7 @@ onMounted(async () => {
         </template>
       </el-table-column>
     </el-table>
-    <el-empty v-else-if="!loading" description="输入站点和日期后点「查询车次」" />
+    <el-empty v-else-if="!loading" :description="searchError ? '查询未完成，请重试' : searched ? '该日期或区间暂无可查车次，请调整条件' : '输入站点和日期后点「查询车次」'" />
   </el-card>
 </template>
 

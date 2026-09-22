@@ -13,6 +13,9 @@
  */
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
 import { ordersApi, type OrderRow } from '../api';
+import ShareImageDialog from '../components/ShareImageDialog.vue';
+import type { ShareContent } from '../utils/share-image';
+const shareContent = ref<ShareContent | null>(null);
 import { fmtCn } from '../utils/time';
 
 /** 定时刷新间隔（毫秒）——不能太频繁，否则有被封风险 */
@@ -44,9 +47,11 @@ const statusOptions = Object.entries(STATUS_META).map(([value, m]) => ({ value, 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let expiryTimer: ReturnType<typeof setTimeout> | null = null;
 let tickTimer: ReturnType<typeof setInterval> | null = null;
-let lastManual = 0;
+const lastManual = ref(0);
+const cooldown = computed(() => Math.max(0, Math.ceil((lastManual.value + MANUAL_COOLDOWN - tick.value) / 1000)));
 
-const unpaidOrders = computed(() => orders.value.filter((o) => o.status === 'unpaid'));
+const unpaidOrders = computed(() => orders.value.filter((o) => o.status === 'unpaid')
+  .sort((a, b) => (a.payLimitTs ?? Infinity) - (b.payLimitTs ?? Infinity)));
 
 /** 按状态多选过滤后的列表（未选任何状态时显示全部） */
 const filteredOrders = computed(() =>
@@ -106,9 +111,12 @@ function scheduleExpiryRefresh(): void {
 }
 
 async function manualRefresh(): Promise<void> {
-  if (Date.now() - lastManual < MANUAL_COOLDOWN) return;
-  lastManual = Date.now();
+  if (Date.now() - lastManual.value < MANUAL_COOLDOWN) return;
+  if (loading.value) return;
+  lastManual.value = Date.now();
+  tick.value = Date.now();
   await load(true);
+  if (errorMsg.value) lastManual.value = 0;
 }
 
 function fmtFetchedAt(): string {
@@ -153,7 +161,7 @@ onBeforeUnmount(() => {
         请尽快打开 12306 APP 完成支付。超时未支付订单会自动失效，系统会在失效后自动重新下单。
         <span v-if="unpaidOrders.length">
           最近一笔截止：<b>{{ unpaidOrders[0].payLimitTime ?? '-' }}</b>
-          （剩 {{ fmtRemaining(remainingMs(unpaidOrders[0])) }}）
+          （{{ unpaidOrders[0].payLimitTs ? fmtRemaining(remainingMs(unpaidOrders[0])) : '请以 12306 显示为准' }}）
         </span>
       </div>
     </el-alert>
@@ -165,7 +173,7 @@ onBeforeUnmount(() => {
           <div style="display: flex; align-items: center; gap: 12px; font-size: 12px; color: #909399">
             <span>最后刷新 {{ fmtFetchedAt() }}<span v-if="cached">（缓存）</span></span>
             <span>定时刷新每 5 分钟 · 页面不可见时暂停</span>
-            <el-button type="primary" size="small" :loading="loading" @click="manualRefresh">刷新</el-button>
+            <el-button type="primary" size="small" :loading="loading" :disabled="cooldown > 0" @click="manualRefresh">{{ cooldown > 0 ? `${cooldown} 秒后可刷新` : '刷新' }}</el-button>
           </div>
         </div>
       </template>
@@ -187,7 +195,17 @@ onBeforeUnmount(() => {
         <span style="font-size: 12px; color: #909399">共 {{ filteredOrders.length }} 条（全部 {{ orders.length }} 条）</span>
       </div>
 
-      <el-table :data="filteredOrders" border v-loading="loading" empty-text="暂无已购车票">
+      <div class="mobile-tickets" v-loading="loading">
+        <el-empty v-if="!filteredOrders.length" description="暂无符合条件的车票" />
+        <article v-for="(ticket, index) in filteredOrders" :key="ticket.orderNo + index" class="mobile-ticket">
+          <div class="ticket-top"><strong>{{ ticket.trainCode }}</strong><el-tag size="small" :type="STATUS_META[ticket.status].type">{{ ticket.statusText || STATUS_META[ticket.status].label }}</el-tag></div>
+          <h3>{{ ticket.fromStation }} <span>→</span> {{ ticket.toStation }}</h3>
+          <p>{{ ticket.travelDateTime }}</p><p>{{ ticket.passengers.join('、') }} · {{ ticket.seats.join('、') || '座位待确认' }}</p>
+          <p v-if="ticket.status === 'unpaid'" class="unpaid-note">支付截止：{{ ticket.payLimitTime || '请查看 12306' }}</p>
+          <div class="ticket-bottom"><span>{{ ticket.totalPrice != null ? '¥' + ticket.totalPrice.toFixed(2) : '' }}</span><el-button type="primary" plain size="small" @click="shareContent = { kind: 'ticket', ticket }">分享到微信</el-button></div>
+        </article>
+      </div>
+      <el-table class="desktop-tickets" :data="filteredOrders" border v-loading="loading" empty-text="暂无已购车票">
         <el-table-column label="订单号" width="150">
           <template #default="{ row }">
             <span class="mono">{{ row.orderNo }}</span>
@@ -228,13 +246,31 @@ onBeforeUnmount(() => {
             <template v-if="row.status === 'unpaid'">
               <div class="mono">{{ row.payLimitTime ?? '-' }}</div>
               <div :style="{ color: remainingMs(row) < 10 * 60 * 1000 ? '#f56c6c' : '#909399', fontSize: '12px' }">
-                剩 {{ fmtRemaining(remainingMs(row)) }}
+                {{ row.payLimitTs ? fmtRemaining(remainingMs(row)) : '请以 12306 显示为准' }}
               </div>
             </template>
             <span v-else style="color: #909399">—</span>
           </template>
         </el-table-column>
+        <el-table-column label="分享" width="110" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="shareContent = { kind: 'ticket', ticket: row }">分享到微信</el-button></template></el-table-column>
       </el-table>
     </el-card>
+    <ShareImageDialog :content="shareContent" @close="shareContent = null" />
   </div>
 </template>
+
+<style scoped>
+.mobile-tickets { display: none; }
+@media (max-width: 760px) {
+  .desktop-tickets { display: none; }
+  .mobile-tickets { display: grid; gap: 14px; }
+  .mobile-ticket { border: 1px solid #e5ecf5; border-radius: 12px; padding: 16px; background: linear-gradient(120deg, #f8fbff, #fff); }
+  .ticket-top, .ticket-bottom { display: flex; align-items: center; justify-content: space-between; }
+  .ticket-top strong { font-size: 19px; color: #3467a6; }
+  .mobile-ticket h3 { font-size: 17px; color: #304e6e; margin: 14px 0 10px; }
+  .mobile-ticket h3 span { color: #a4b3c3; margin: 0 4px; }
+  .mobile-ticket p { font-size: 12px; color: #7d8da0; line-height: 1.7; margin: 5px 0; }
+  .ticket-bottom { margin-top: 14px; padding-top: 12px; border-top: 1px dashed #dbe5f1; color: #667e98; font-size: 14px; }
+  .mobile-ticket .unpaid-note { color: #c27b44; }
+}
+</style>

@@ -6,12 +6,13 @@ import { z } from 'zod';
 import { PassengersRepo, PlansRepo, PlanDatesRepo, TasksRepo, RailwayAccountRepo } from '../db/repo.js';
 import { currentUser } from './auth.routes.js';
 import { previewForPlan } from '../plans/date-engine.js';
-import { ensureYears, isWorkday, holidayName, addDays, isYearDegraded } from '../calendar/holidays.js';
+import { ensureYears, isWorkday, holidayName, addDays, isYearDegraded, today } from '../calendar/holidays.js';
 import { Logger } from '../logger.js';
 import { nanoid } from 'nanoid';
 import { DEFAULT_PRESALE_DAYS } from '../config.js';
 import { wsHub } from '../ws/hub.js';
 import { SEAT_NAMES } from '../bot/constants.js';
+import { trainQueryErrorMessage } from '../bot/train-query-error.js';
 
 const logger = new Logger('plan');
 
@@ -24,77 +25,100 @@ const passengerSchema = z.object({
   passengerType: z.string().default('成人'),
 });
 
-const planSchema = z.object({
-  name: z.string().min(1).max(64),
-  fromStation: z.string().min(1),
-  toStation: z.string().min(1),
+const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, '日期格式应为 YYYY-MM-DD').refine((value) => {
+  const date = new Date(value + 'T00:00:00Z');
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}, '日期无效');
+const timeSchema = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, '时间格式应为 HH:mm');
+const dateFields = {
   dateMode: z.enum(['single', 'recurring', 'workweek']),
-  travelDate: z.string().nullable().optional(),
+  travelDate: dateSchema.nullable().optional(),
   weekday: z.number().int().min(1).max(7).nullable().optional(),
   weekEdge: z.enum(['start', 'end']).nullable().optional(),
   weekInterval: z.number().int().min(1).max(4).default(1),
   offsetDays: z.number().int().min(-6).max(6).default(0),
-  validFrom: z.string(),
-  validUntil: z.string().nullable().optional(),
-  timeFrom: z.string().nullable().optional(),
-  timeTo: z.string().nullable().optional(),
+  validFrom: dateSchema,
+  validUntil: dateSchema.nullable().optional(),
+  timeFrom: timeSchema.nullable().optional(),
+  timeTo: timeSchema.nullable().optional(),
+};
+const dateRuleSchema = z.object(dateFields);
+type DateInput = z.infer<typeof dateRuleSchema>;
+function validateDates(body: DateInput, ctx: z.RefinementCtx): void {
+  const issue = (path: string, message: string) => ctx.addIssue({ code: 'custom', path: [path], message });
+  if (body.dateMode === 'single' && !body.travelDate) issue('travelDate', '单次模式必须指定具体乘车日期');
+  if (body.dateMode === 'single' && body.travelDate && body.travelDate < today()) issue('travelDate', '乘车日期不能早于今天');
+  if (body.dateMode === 'recurring' && !body.weekday) issue('weekday', '周期模式必须指定周几');
+  if (body.dateMode === 'workweek' && !body.weekEdge) issue('weekEdge', '工作周模式必须选择工作周开始或工作周结束');
+  if (body.dateMode !== 'single' && body.validUntil && body.validUntil < body.validFrom) issue('validUntil', '结束日期不能早于开始日期');
+  if (body.timeFrom && body.timeTo && body.timeFrom > body.timeTo) issue('timeTo', '出发时间段的结束时间不能早于开始时间');
+}
+const previewSchema = dateRuleSchema.superRefine(validateDates);
+const planSchema = z.object({
+  id: z.string().min(1).optional(),
+  name: z.string().trim().min(1, '请填写计划名称').max(64),
+  fromStation: z.string().trim().min(1, '请填写出发站'),
+  toStation: z.string().trim().min(1, '请填写到达站'),
+  ...dateFields,
   trainNumbers: z.array(z.string()).nullable().optional(),
-  seatPositions: z.array(z.enum(['A', 'B', 'C', 'D', 'F'])).default([]),
+  trainSegments: z.array(z.object({ trainCode: z.string().trim().min(1), fromStation: z.string().trim().min(1), toStation: z.string().trim().min(1) })).default([]),
+  seatPositions: z.array(z.enum(['A', 'B', 'C', 'D', 'F'])).nullable().default([]),
   /** 席别（必选多选）：订票时严格按所选席别匹配，不回退未选席别 */
   seatTypes: z.array(z.enum(['ZE', 'ZY', 'TZ', 'GR', 'RW', 'YW', 'RZ', 'YZ'])).min(1, '请至少选择一个席别'),
   allowNoSeat: z.boolean().default(false),
-  passengerIds: z.array(z.string()).min(1),
+  passengerIds: z.array(z.string()).min(1, '请至少选择一名乘车人'),
+}).superRefine((body, ctx) => {
+  validateDates(body, ctx);
+  if (body.fromStation === body.toStation) ctx.addIssue({ code: 'custom', path: ['toStation'], message: '出发站和到达站不能相同' });
 });
 
 export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, done) => {
   /** 乘车人列表 */
-  app.get('/api/passengers', async () => {
-    const user = currentUser();
+  app.get('/api/passengers', async (request) => {
+    const user = currentUser(request);
     return PassengersRepo.list(user.id);
   });
 
   /** 新增/更新乘车人 */
   app.post('/api/passengers', async (request, reply) => {
-    const user = currentUser();
+    const user = currentUser(request);
     const parsed = passengerSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: '参数错误', detail: parsed.error.flatten() });
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? '参数错误', detail: parsed.error.flatten() });
+    if (parsed.data.id && !PassengersRepo.list(user.id).some(p => p.id === parsed.data.id)) return reply.code(404).send({ error: '乘车人不存在' });
     return PassengersRepo.upsert(user.id, { ...parsed.data, source: 'manual', phone: parsed.data.phone ?? null });
   });
 
-  app.delete('/api/passengers/:id', async (request) => {
+  app.delete('/api/passengers/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
+    if (!PassengersRepo.list(currentUser(request).id).some(p => p.id === id)) return reply.code(404).send({ error: '乘车人不存在' });
     PassengersRepo.delete(id);
     return { ok: true };
   });
 
   /** 计划列表 */
-  app.get('/api/plans', async () => {
-    const user = currentUser();
+  app.get('/api/plans', async (request) => {
+    const user = currentUser(request);
     return PlansRepo.list(user.id);
   });
 
   /** 新建/更新计划 */
   app.post('/api/plans', async (request, reply) => {
-    const user = currentUser();
+    const user = currentUser(request);
     const parsed = planSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: '参数错误', detail: parsed.error.flatten() });
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? '参数错误', detail: parsed.error.flatten() });
     const body = parsed.data;
-    // 校验：single 必须有 travelDate；recurring 必须有 weekday；workweek 必须选工作周开始/结束
-    if (body.dateMode === 'single' && !body.travelDate) {
-      return reply.code(400).send({ error: '单次模式必须指定具体乘车日期' });
+    const existing = body.id ? PlansRepo.get(body.id) : null;
+    if (body.id && (!existing || existing.userId !== user.id || existing.status === 'deleted')) {
+      return reply.code(404).send({ error: '计划不存在，请重新打开计划列表' });
     }
-    if (body.dateMode === 'recurring' && !body.weekday) {
-      return reply.code(400).send({ error: '周期模式必须指定周几' });
-    }
-    if (body.dateMode === 'workweek' && !body.weekEdge) {
-      return reply.code(400).send({ error: '工作周模式必须选择工作周开始或工作周结束' });
-    }
-    const id = (request.body as { id?: string })?.id ?? nanoid();
+    const passengerIds = new Set(PassengersRepo.list(user.id).map((p) => p.id));
+    if (body.passengerIds.some((id) => !passengerIds.has(id))) return reply.code(400).send({ error: '乘车人不存在，请重新同步并选择' });
+    const id = body.id ?? nanoid();
     const plan = PlansRepo.save({
       id,
       userId: user.id,
       name: body.name,
-      status: 'active',
+      status: existing?.status ?? 'active',
       fromStation: body.fromStation,
       toStation: body.toStation,
       dateMode: body.dateMode,
@@ -108,6 +132,7 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
       timeFrom: body.timeFrom ?? null,
       timeTo: body.timeTo ?? null,
       trainNumbers: body.trainNumbers ?? null,
+      trainSegments: body.trainSegments.filter(segment => body.trainNumbers?.includes(segment.trainCode)),
       seatPositions: body.seatPositions ?? null,
       seatTypes: body.seatTypes,
       allowNoSeat: body.allowNoSeat,
@@ -119,9 +144,11 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
 
   /** 暂停/恢复/删除计划 */
   app.post('/api/plans/:id/status', async (request, reply) => {
-    const user = currentUser();
+    const user = currentUser(request);
     const { id } = request.params as { id: string };
-    const { status } = z.object({ status: z.enum(['active', 'paused', 'deleted']) }).parse(request.body);
+    const parsed = z.object({ status: z.enum(['active', 'paused', 'deleted']) }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: '计划状态无效' });
+    const { status } = parsed.data;
     const plan = PlansRepo.get(id);
     if (!plan || plan.userId !== user.id) return reply.code(404).send({ error: '计划不存在' });
     PlansRepo.setStatus(id, status);
@@ -133,9 +160,9 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
    * 支持不存库直接预览（新建计划前先看推算结果）。
    */
   app.post('/api/plans/preview-dates', async (request, reply) => {
-    const user = currentUser();
-    const parsed = planSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: '参数错误', detail: parsed.error.flatten() });
+    const user = currentUser(request);
+    const parsed = previewSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? '参数错误', detail: parsed.error.flatten() });
     const body = parsed.data;
     // 预估起售日期 = 乘车日期 - 预售期（精确起售时刻由起售查询接口确定）
     // 节假日数据是工作周推算的前提，缺失时返回可读错误而不是 500
@@ -162,7 +189,7 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
 
   /** 已保存计划的推算日期 + 关联任务状态 */
   app.get('/api/plans/:id/dates', async (request, reply) => {
-    const user = currentUser();
+    const user = currentUser(request);
     const { id } = request.params as { id: string };
     const plan = PlansRepo.get(id);
     if (!plan || plan.userId !== user.id) return reply.code(404).send({ error: '计划不存在' });
@@ -212,13 +239,15 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
    * saleAt 设为当前时间即"立即到期"，等价于马上跑。
    */
   app.post('/api/plans/:id/tasks/:taskId/retry', async (request, reply) => {
-    const user = currentUser();
+    const user = currentUser(request);
     const { id, taskId } = request.params as { id: string; taskId: string };
     const plan = PlansRepo.get(id);
     if (!plan || plan.userId !== user.id) return reply.code(404).send({ error: '计划不存在' });
     const task = TasksRepo.get(taskId);
     if (!task || task.planId !== id) return reply.code(404).send({ error: '任务不存在' });
-    if (task.status === 'running') return reply.code(409).send({ error: '任务正在执行，无法重试' });
+    if (plan.status !== 'active') return reply.code(409).send({ error: '请先恢复计划后再重试' });
+    if (!['failed', 'skipped'].includes(task.status)) return reply.code(409).send({ error: '只能重试失败或已跳过的任务' });
+    if (task.travelDate < today()) return reply.code(400).send({ error: '乘车日期已过，无法重试' });
 
     TasksRepo.update(taskId, {
       status: 'queried',
@@ -257,7 +286,7 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
   app.get('/api/calendar/holidays', async (request, reply) => {
     const { year, month } = request.query as { year?: string; month?: string };
     const y = Number(year);
-    if (!Number.isInteger(y)) {
+    if (!Number.isInteger(y) || y < 2000 || y > 2100) {
       return reply.code(400).send({ error: 'year 参数无效' });
     }
     const m = month !== undefined && month !== '' ? Number(month) : null;
@@ -283,7 +312,7 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
    * 12306 调整席别时只需改 constants.ts，前端自动同步。
    * 商务座不纳入可选：用户明确要求不买商务座，常规席别售罄即失败告警。
    */
-  app.get('/api/meta/seat-types', async () => {
+  app.get('/api/meta/seat-types', async (request) => {
     return Object.entries(SEAT_NAMES)
       .filter(([code]) => code !== 'SWZ' && code !== 'WZ' && code !== 'QT')
       .map(([code, name]) => ({ code, name }));
@@ -294,12 +323,15 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
    * 需已登录 12306：用真实余票查询结果帮用户选车次，避免填错车次号。
    */
   app.get('/api/trains/search', async (request, reply) => {
-    const user = currentUser();
+    const user = currentUser(request);
     const { from, to, date } = request.query as { from?: string; to?: string; date?: string };
     if (!from || !to || !date) return reply.code(400).send({ error: '请提供出发站、到达站和乘车日期' });
     // 过去日期 12306 不卖票，查询必然失败——直接挡掉，给可读提示
-    const today = new Date().toISOString().slice(0, 10);
-    if (date < today) return reply.code(400).send({ error: '不能查询过去日期的车次，请选择今天或以后的日期' });
+    if (!dateSchema.safeParse(date).success) return reply.code(400).send({ error: '乘车日期无效，请使用 YYYY-MM-DD 格式' });
+    if (from.trim() === to.trim()) return reply.code(400).send({ error: '出发站和到达站不能相同' });
+    if (date < today()) return reply.code(400).send({ error: '不能查询过去日期的车次，请选择今天或以后的日期' });
+    const lastDate = addDays(today(), DEFAULT_PRESALE_DAYS);
+    if (date > lastDate) return reply.code(400).send({ code: 'NOT_ON_SALE', error: `${date} 尚未开售，当前可查询至 ${lastDate}。可先保存计划，开售后自动查询。` });
     const acc = RailwayAccountRepo.get(user.id);
     if (!acc || acc.status !== 'active') {
       return reply.code(400).send({ error: '12306 未登录，请先在顶栏扫码登录后查询车次' });
@@ -318,7 +350,7 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
           arriveTime: t.arriveTime,
           duration: t.duration,
           /** 余票里出现的席别（透传给前端做选项，不写死） */
-          seatTypes: Object.keys(t.seats),
+          seatTypes: Object.entries(SEAT_NAMES).filter(([, name]) => name in t.seats).map(([code]) => code),
           /** 各席别余票文本（车次查询页展示用） */
           seats: t.seats,
         })),
@@ -326,7 +358,7 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logger.warn('车次查询失败', { by: user.username, from, to, date, error: msg });
-      return reply.code(400).send({ error: msg });
+      return reply.code(502).send({ error: trainQueryErrorMessage(e) });
     }
   });
 

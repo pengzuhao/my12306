@@ -22,7 +22,8 @@ import { Logger } from '../logger.js';
 import { queryTrains, seatCount } from './tickets.js';
 import { queryPurchasedTickets } from './reconcile.js';
 import { parseCnTimestamp } from './orders.js';
-import type { Passenger, TrainInfo } from '../types.js';
+import { submittedSeatNames } from './seat-result.js';
+import type { Passenger, TrainInfo, TrainSegment } from '../types.js';
 
 const logger = new Logger('bot');
 
@@ -32,6 +33,7 @@ export interface PurchaseParams {
   toStation: string;
   /** 指定车次；为空则按时间范围自动匹配 */
   trainNumbers: string[] | null;
+  trainSegments?: TrainSegment[];
   /** 出发时间范围（含），如 08:00 / 09:00 */
   timeFrom?: string | null;
   timeTo?: string | null;
@@ -54,6 +56,7 @@ export interface PurchaseResult {
   trainCode: string;
   passengers: string[];
   seatInfo?: string;
+  seatInfoSource?: 'submitted' | 'order';
   payDeadline?: string;
   /** 支付截止时间戳（毫秒，北京时间解析）；调度器据此设定"支付到期定时器" */
   payDeadlineTs?: number;
@@ -106,6 +109,10 @@ export function pickTrain(trains: TrainInfo[], params: PurchaseParams): TrainInf
   const hasPrefSeat = (t: TrainInfo) => pref.some((code) => seatCount(t.seats[SEAT_NAMES[code]]) > 0);
   // 选出"有余票席别"集合，供后续提交时使用
   const candidates = trains
+    .filter(t => {
+      const segments = params.trainSegments?.filter(s => s.trainCode.toUpperCase() === t.trainCode.toUpperCase()) ?? [];
+      return !segments.length || segments.some(s => s.fromStation === t.fromStation && s.toStation === t.toStation);
+    })
     .filter((t) => t.departTime !== '--' && t.departTime !== '24:00')
     .filter((t) => inTimeRange(t.departTime, params.timeFrom, params.timeTo))
     .filter(anySeat)
@@ -249,67 +256,6 @@ async function pickPassengersAndGetStrings(page: Page, passengers: Passenger[]):
   return strs;
 }
 
-/**
- * 从确认页读取【实际选中】的席别名称。
- *
- * 查询页的余票是缓存，进了确认页才会渲染真实可选席别（经常与查询不一致：
- * 查的时候"二等座有"，进确认页可能只剩无座）。用户的硬要求是"不买无座票"，
- * 所以必须以确认页实际选中的席别为准，在提交前拦截。
- *
- * 12306 确认页的席别选择区结构会改版，这里用多策略兜底：
- *  1. 找带"选中态" class（cur/selected/active/on）且文本是席别名的元素
- *  2. 找被选中的 radio/checkbox（其所属标签文本）
- *  3. 退化：页面文本里出现的所有席别名，取第一个（确认页一定展示当前席别）
- * 拿到的是"无座"时由调用方决定是否拦截。
- */
-const SEAT_NAME_RE = '商务座|特等座|一等座|二等座|高级软卧|软卧|硬卧|软座|硬座|无座|其他';
-
-async function readActualSeat(page: Page): Promise<{ name: string } | null> {
-  try {
-    const found = await page.evaluate((reSrc: string) => {
-      type El = {
-        textContent?: string | null;
-        getAttribute?: (s: string) => string | null;
-        closest?: (s: string) => { textContent?: string | null } | null;
-      };
-      const re = new RegExp(reSrc);
-      const w = globalThis as unknown as {
-        document?: {
-          querySelectorAll?: (s: string) => El[];
-          body?: { textContent?: string | null };
-        };
-      };
-      const doc = w.document;
-      if (!doc?.querySelectorAll) return null;
-      const isSelected = (el: El): boolean => {
-        const cls = ((el.getAttribute?.('class') ?? '') + ' ' + (el.getAttribute?.('aria-selected') ?? '')).toLowerCase();
-        return /(^|\s)(cur|selected|active|on|checked)(\s|$)/.test(cls);
-      };
-      const seatText = (el: El): string => (el.textContent ?? '').trim();
-      // 策略 1：带选中态的席别元素
-      const all = Array.from(doc.querySelectorAll('li,div,span,a,label,td,p'));
-      const sel = all.find((el) => isSelected(el) && re.test(seatText(el)) && seatText(el).length < 12);
-      if (sel) return seatText(sel);
-      // 策略 2：选中的 radio/checkbox 所在行
-      const boxes = Array.from(doc.querySelectorAll('input[type="radio"],input[type="checkbox"]'));
-      const boxSel = boxes.find((b) => b.getAttribute?.('checked') !== null && re.test(b.closest?.('tr,li,label,div')?.textContent ?? ''));
-      if (boxSel) {
-        const t = (boxSel.closest?.('tr,li,label,div')?.textContent ?? '').trim().match(re);
-        if (t) return t[0];
-      }
-      // 策略 3：页面里出现的第一个席别名（确认页必然展示当前要买的席别）
-      const bodyText = doc.body?.textContent ?? '';
-      const m = bodyText.match(re);
-      return m ? m[0] : null;
-    }, SEAT_NAME_RE);
-    if (!found) return null;
-    return { name: found };
-  } catch (e) {
-    logger.warn('读取确认页实际席别失败', e);
-    return null;
-  }
-}
-
 /** 确认页渲染后的页面状态（token + 页面特征） */
 interface ConfirmPageState {  token: string;
   hasSubmit: boolean;
@@ -405,13 +351,13 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
     // 3) 查票页：URL 参数填显示文本，隐藏电报码域手动填
     const queryUrl =
       `${URLS.LEFT_TICKET_INIT}?linktypeid=dc` +
-      `&fs=${encodeURIComponent(params.fromStation)}` +
-      `&ts=${encodeURIComponent(params.toStation)}` +
+      `&fs=${encodeURIComponent(train.fromStation)}` +
+      `&ts=${encodeURIComponent(train.toStation)}` +
       `&date=${params.trainDate}&flag=0`;
     await page.goto(queryUrl, { waitUntil: 'networkidle', timeout: 40000 });
     const { stationCode } = await import('./stations.js');
-    const fromCode = await stationCode(params.fromStation);
-    const toCode = await stationCode(params.toStation);
+    const fromCode = await stationCode(train.fromStation);
+    const toCode = await stationCode(train.toStation);
     if (!fromCode || !toCode) {
       return { ok: false, trainCode: train.trainCode, passengers: names, error: `车站电报码解析失败：${params.fromStation}/${params.toStation}` };
     }
@@ -440,23 +386,28 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
     await page.waitForTimeout(5000);
 
     // 4) 点击目标车次的"预订"按钮（checkG1234）
-    const clicked = await page.evaluate((code: string) => {
+    const clicked = await page.evaluate((target: { trainCode: string; fromStation: string; toStation: string; departTime: string; arriveTime: string }) => {
       const w = globalThis as unknown as {
         document?: {
           querySelectorAll?: (s: string) => Array<{
             click?: () => void;
-            closest?: (s: string) => { textContent?: string } | null;
+            closest?: (s: string) => { textContent?: string; querySelectorAll?: (s: string) => Array<{ textContent?: string }> } | null;
           }>;
         };
       };
       const btns = Array.from(w.document?.querySelectorAll?.('a.btn72') ?? []);
-      const btn = btns.find((x) => x.closest?.('tr')?.textContent?.includes(code));
+      const matches = btns.filter(x => {
+        const row = x.closest?.('tr');
+        const labels = new Set(Array.from(row?.querySelectorAll?.('*') ?? []).map(el => el.textContent?.trim()));
+        return [target.trainCode, target.fromStation, target.toStation, target.departTime, target.arriveTime].every(label => labels.has(label));
+      });
+      const btn = matches.length === 1 ? matches[0] : null;
       if (btn) {
         btn.click?.();
         return true;
       }
       return false;
-    }, train.trainCode);
+    }, { trainCode: train.trainCode, fromStation: train.fromStation, toStation: train.toStation, departTime: train.departTime, arriveTime: train.arriveTime });
     if (!clicked) {
       return { ok: false, trainCode: train.trainCode, passengers: names, error: `查票页未找到 ${train.trainCode} 的预订按钮（可能已售罄或为候补）` };
     }
@@ -528,29 +479,16 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
       return { ok: false, trainCode: train.trainCode, passengers: names, error: '确认页未找到目标乘车人，请检查常用联系人是否已同步' };
     }
 
-    // 6.5) 提交前校验【实际席别】——这是用户"不要买无座票"要求的关键防线。
-    //   查询页的余票是缓存（经常与实际有出入：查时"二等座有"，进确认页只剩无座），
-    //   而 getpassengerTickets() 的首字段就是当前选中席别。必须以页面实际选中为准：
-    //   是无座且计划没勾"允许无座" → 绝不提交，直接失败告警。
-    const paxSeatCode = strs.ticketStr.split(',')[0]?.trim() ?? '';
-    const actualSeat = await readActualSeat(page);
-    logger.info('订单参数就绪', {
-      train: train.trainCode,
-      seatQuery: seat.name,
-      seatPaxCode: paxSeatCode,
-      seatActual: actualSeat?.name ?? '(未知)',
-      pax: strs.ticketStr.slice(0, 60),
-    });
-    const isNoSeat = actualSeat?.name === '无座' || paxSeatCode === 'WZ';
-    if (isNoSeat && !params.allowNoSeat) {
-      logger.warn('确认页实际席别为无座，计划未允许无座，放弃本次下单', { train: train.trainCode, seatQuery: seat.name, paxSeatCode });
-      return {
-        ok: false,
-        trainCode: train.trainCode,
-        passengers: names,
-        error: `${train.trainCode} 当前仅剩无座票，计划未开启「允许无座」，已放弃下单（避免买到站票）`,
-      };
+    // The submitted passenger rows are authoritative; never read a seat name from page-wide text.
+    const selectedLabels = await page.locator('select[id^="seatType_"] option:checked').allTextContents().catch(() => []);
+    const actualSeats = submittedSeatNames(strs.ticketStr, selectedLabels);
+    const allowed = new Set(preferSeatTypes(params).map(code => SEAT_NAMES[code]).filter(name => name !== '商务座'));
+    if (params.allowNoSeat) allowed.add('无座');
+    if (!actualSeats || actualSeats.length !== params.passengers.length || actualSeats.some(name => !allowed.has(name))) {
+      return { ok: false, trainCode: train.trainCode, passengers: names,
+        error: `${train.trainCode} 确认页席别无法核实或不符合计划，已停止提交，请检查席别设置` };
     }
+    logger.info('订单参数就绪', { train: train.trainCode, seatQuery: seat.name, seatActual: actualSeats });
 
     // 7) checkOrderInfo（官方参数结构）
     const check = await page.evaluate(
@@ -685,10 +623,7 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
       ? new Date(payDeadlineTs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
       : undefined;
 
-    // 汇总席别信息（用于通知）：优先用确认页读到的【实际下单席别】，
-    // 其次回退到查询页的估计值。避免通知写"二等座"实际却是无座。
-    const seatName = actualSeat?.name ?? seat.name;
-    const seatSummary = `${seatName}(${train.seats[seatName] ?? train.seats[seat.name] ?? '?'})`;
+    const seatSummary = [...new Set(actualSeats)].join('、');
 
     logger.info('订单已提交（未支付）', { train: train.trainCode, orderNo });
 
@@ -696,7 +631,8 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
       ok: true,
       trainCode: train.trainCode,
       passengers: names,
-      seatInfo: seatSummary || `${train.trainCode} 已锁座`,
+      seatInfo: seatSummary,
+      seatInfoSource: 'submitted',
       orderNo,
       // 12306 下发的实际支付截止时间（北京时间），拿不到时为 undefined——绝不编造
       payDeadline,

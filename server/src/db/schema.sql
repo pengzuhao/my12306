@@ -130,3 +130,16 @@ CREATE TABLE IF NOT EXISTS logs (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_logs_user_created ON logs(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
+CREATE TABLE IF NOT EXISTS notification_channels (
+  id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, type TEXT NOT NULL, config TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1, events TEXT NOT NULL,
+  last_status TEXT, last_sent_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS app_migrations (name TEXT PRIMARY KEY);

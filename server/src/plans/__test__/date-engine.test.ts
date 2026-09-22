@@ -2,8 +2,23 @@
  * 日期推算引擎离线测试（无需网络亦可验证逻辑，节假日数据优先用缓存）。
  * 运行：npm run test:date-engine --workspace server
  */
-import { computeDates, previewForPlan } from '../date-engine.js';
-import { ensureYears, isWorkday, weekdayOf } from '../../calendar/holidays.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import { resolvePlanSearchTarget } from '../../../../web/src/utils/plan-search-date.js';
+import type { PlanForm } from '../../../../web/src/api/index.js';
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'my12306-dates-'));
+process.env.MY12306_DATA_DIR = dir;
+// Fixed calendar fixtures keep CI offline and away from the user's database.
+const holidays = Object.fromEntries(Array.from({length: 7}, (_, i) => [`2026-10-0${i + 1}`, {name: '测试国庆假期', isOffDay: true}]));
+holidays['2026-09-20'] = {name: '测试补班', isOffDay: false};
+fs.writeFileSync(path.join(dir, 'holidays.json'), JSON.stringify({2025: {}, 2026: holidays, 2027: {}}));
+globalThis.fetch = async () => { throw new Error('日期单测不应请求范围外的年份或外部网络'); };
+const { computeDates, previewForPlan } = await import('../date-engine.js');
+const { ensureYears, isWorkday, weekdayOf } = await import('../../calendar/holidays.js');
+const { closeDb } = await import('../../db/index.js');
+process.on('exit', () => { closeDb(); fs.rmSync(dir, {recursive: true, force: true}); });
 import type { Plan } from '../../types.js';
 
 // 以一个固定的"今天"作为生成起点，保证测试可复现
@@ -126,6 +141,39 @@ async function main(): Promise<void> {
   show('workweek 锚点 9.20，05:00 未发车（应保留 9.20）', upcoming);
   const upcomingOk = upcoming.length > 0 && upcoming[0].travelDate === '2026-09-20';
   console.log(`  → 首个目标保留为今天 9.20：${upcomingOk}`);
+
+  const workweekRule = { dateMode: 'workweek', weekEdge: 'start', weekInterval: 1, validFrom: '2026-09-23', validUntil: '2026-10-31' } as const;
+  const midweek = await previewForPlan(workweekRule, '2026-09-22', '22:00');
+  assert.equal(midweek[0].travelDate, '2026-09-28', '周三生效不能把周三变成工作周第一天');
+  assert.equal(midweek[1].travelDate, '2026-10-08', '国庆后本周首个工作日取周四');
+  const todayStart = await computeDates({ ...workweekRule, validFrom: '2026-09-22' }, '2026-09-22', '08:00');
+  assert.equal(todayStart[0].travelDate, '2026-09-28', '今天在周中也应跳过本周起点');
+  const weekEnd = await computeDates({ ...workweekRule, weekEdge: 'end' }, '2026-09-22');
+  assert.equal(weekEnd[0].travelDate, '2026-09-25', '工作周末取本周末，不是开始日期后第七天');
+  const limited = await computeDates({ ...workweekRule, validUntil: '2026-09-27' }, '2026-09-22');
+  assert.deepEqual(limited, [], '范围内没有完整目标日时不退回开始日期');
+  const everyTwo = { ...workweekRule, weekInterval: 2 };
+  assert.deepEqual((await computeDates(everyTwo, '2026-09-22')).map(e => e.travelDate), ['2026-09-28', '2026-10-12', '2026-10-26']);
+  assert.equal((await computeDates(everyTwo, '2026-10-01'))[0].travelDate, '2026-10-12', '今天推进不改变隔周周期');
+  assert.equal((await computeDates({ ...workweekRule, offsetDays: -1 }, '2026-09-22'))[0].travelDate, '2026-09-27');
+  assert.equal((await computeDates({ ...workweekRule, offsetDays: -1, validUntil: '2026-09-27' }, '2026-09-22'))[0].travelDate, '2026-09-27', '负偏移日期可落在最后一个周末');
+  assert.equal((await computeDates({ ...workweekRule, validFrom: '2026-09-21', offsetDays: 2 }, '2026-09-22'))[0].travelDate, '2026-09-22', '正偏移不会漏掉前一周目标');
+  assert.equal((await computeDates({ ...workweekRule, validFrom: '2026-09-28', timeFrom: '08:00', timeTo: null }, '2026-09-28', '09:00'))[0].travelDate, '2026-09-28', '仅设置时间下限不表示当日全部班次已错过');
+  assert.equal((await computeDates({ ...workweekRule, validFrom: '2026-09-28', timeTo: '09:00' }, '2026-09-28', '10:00'))[0].travelDate, '2026-10-08');
+  const searchForm = workweekRule as PlanForm;
+  let previewCalls = 0;
+  assert.equal((await resolvePlanSearchTarget(searchForm, async form => {
+    previewCalls++; return previewForPlan(form, '2026-09-22', '22:00');
+  }))?.travelDate, '2026-09-28', '余票查询与预览使用同一推算日期');
+  assert.equal(previewCalls, 1);
+  assert.equal(await resolvePlanSearchTarget(searchForm, async () => []), null, '空预览不查询开始日期');
+  const singleTarget = await resolvePlanSearchTarget({ ...searchForm, dateMode: 'single', travelDate: '2026-09-23' }, form => previewForPlan(form, '2026-09-22', '22:00'));
+  assert.equal(singleTarget?.travelDate, '2026-09-23');
+  assert.equal(singleTarget?.estimatedSaleDate, '2026-09-09', '单次查询也使用服务端的预售期推算');
+  const recurringRule = { dateMode: 'recurring', weekday: 1, weekInterval: 2, validFrom: '2026-09-23', validUntil: '2026-10-31' } as const;
+  assert.equal((await computeDates(recurringRule, '2026-10-01'))[0].travelDate, '2026-10-12', '固定星期隔周计划同样保持周期');
+  assert.equal((await computeDates({ ...recurringRule, offsetDays: -1 }, '2026-09-22'))[0].travelDate, '2026-09-27');
+  console.log('✅ 工作周完整边界、隔周稳定性、偏移、当日窗口、余票日期一致性回归通过');
 
   // 简单断言
   const ok =

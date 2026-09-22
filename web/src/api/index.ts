@@ -3,6 +3,8 @@ import axios from 'axios';
 export const http = axios.create({
   baseURL: '/api',
   timeout: 30000,
+  // XHR rejects custom schemes; Electron's protocol handler supports Fetch.
+  adapter: typeof location !== 'undefined' && location.protocol === 'my12306:' ? 'fetch' : undefined,
 });
 
 // ---- 乘车人 ----
@@ -22,7 +24,7 @@ export interface TaskSnapshot {
   status: string;
   attempts: number;
   error: string | null;
-  result: { trainCode?: string; seatInfo?: string; orderNo?: string } | null;
+  result: { trainCode?: string; seatInfo?: string; seatInfoSource?: 'submitted' | 'order'; orderNo?: string } | null;
   startedAt: string | null;
   finishedAt: string | null;
 }
@@ -58,6 +60,7 @@ export interface PlanForm {
   timeFrom: string | null;
   timeTo: string | null;
   trainNumbers: string[] | null;
+  trainSegments?: Array<{ trainCode: string; fromStation: string; toStation: string }>;
   seatPositions: string[] | null;
   /** 席别（必选多选）：订票时严格按所选席别匹配，不回退未选席别 */
   seatTypes: string[];
@@ -80,10 +83,17 @@ export const planApi = {
 };
 
 // ---- 会话（扫码登录，不保存密码） ----
+export interface QrSnapshot {
+  attemptId: string; phase: 'loading' | 'ready' | 'scanned' | 'expired' | 'refreshing' | 'error' | 'cancelled' | 'success';
+  image: string | null; status: string; autoRefresh: boolean; revision: number;
+}
 export const sessionApi = {
   state: () => http.get('/session').then((r) => r.data),
-  login: () => http.post('/session/login').then((r) => r.data),
-  cancelLogin: () => http.post('/session/cancel-login').then((r) => r.data),
+  login: (attemptId: string, autoRefresh: boolean) => http.post<QrSnapshot>('/session/login', { attemptId, autoRefresh }).then(r => r.data),
+  qr: (attemptId: string) => http.get<QrSnapshot>('/session/qr', { params: { attemptId } }).then(r => r.data),
+  refreshQr: (attemptId: string) => http.post<QrSnapshot>('/session/refresh-qr', { attemptId }).then(r => r.data),
+  qrOptions: (attemptId: string, autoRefresh: boolean) => http.post<QrSnapshot>('/session/qr-options', { attemptId, autoRefresh }).then(r => r.data),
+  cancelLogin: (attemptId: string) => http.post('/session/cancel-login', { attemptId }).then(r => r.data),
   check: () => http.post('/session/check').then((r) => r.data),
   logout: () => http.post('/session/logout').then((r) => r.data),
   syncPassengers: () => http.post('/session/sync-passengers').then((r) => r.data),
@@ -137,14 +147,6 @@ export const metaApi = {
     http.get('/trains/search', { params: { from, to, date } }).then((r) => r.data as { trains: TrainOption[] }),
 };
 
-// ---- 飞书 ----
-export const feishuApi = {
-  get: () => http.get('/feishu').then((r) => r.data),
-  save: (data: { webhookUrl: string; secret: string | null; enabled: boolean; remark?: string | null }) =>
-    http.post('/feishu', data).then((r) => r.data),
-  test: () => http.post('/feishu/test').then((r) => r.data),
-};
-
 // ---- 任务与日志 ----
 export const taskApi = {
   list: () => http.get('/tasks').then((r) => r.data),
@@ -182,14 +184,13 @@ export const ordersApi = {
   list: () => http.get('/orders').then((r) => r.data as OrdersResponse),
 };
 
-export const logApi = {
-  list: (limit = 100) => http.get('/logs', { params: { limit } }).then((r) => r.data),
-};
-
 /** WebSocket 实时通道（日志/会话/任务/扫码二维码） */
 export class WsClient {
   private ws: WebSocket | null = null;
   private url: string;
+  private stopped = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private unsubscribeDesktop: (() => void) | null = null;
 
   constructor() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -197,35 +198,66 @@ export class WsClient {
   }
 
   connect(handlers: {
+    onConnection?: (connected: boolean) => void;
     onLog?: (m: unknown) => void;
     onSession?: (m: unknown) => void;
     onTask?: (m: unknown) => void;
-    onQrCode?: (m: { image: string; status?: string }) => void;
+    onQrCode?: (m: QrSnapshot) => void;
   }): void {
-    this.ws = new WebSocket(this.url);
-    this.ws.onmessage = (ev) => {
+    this.close();
+    this.stopped = false;
+    const receive = (msg: { type: string; payload: unknown }) => {
       try {
-        const msg = JSON.parse(ev.data) as { type: string; payload: unknown };
         if (msg.type === 'log') handlers.onLog?.(msg.payload);
         if (msg.type === 'session') handlers.onSession?.(msg.payload);
         if (msg.type === 'task') handlers.onTask?.(msg.payload);
-        if (msg.type === 'qr_code') handlers.onQrCode?.(msg.payload as { image: string; status?: string });
+        if (msg.type === 'qr_code') handlers.onQrCode?.(msg.payload as QrSnapshot);
       } catch {
         // ignore
       }
     };
+    const desktop = (window as Window & { my12306Desktop?: { onEvent?: (callback: typeof receive) => () => void } }).my12306Desktop;
+    if (desktop?.onEvent && location.protocol === 'my12306:') {
+      this.unsubscribeDesktop = desktop.onEvent(receive);
+      handlers.onConnection?.(true);
+      return;
+    }
+    this.ws = new WebSocket(this.url);
+    this.ws.onopen = () => handlers.onConnection?.(true);
+    this.ws.onmessage = ev => { try { receive(JSON.parse(ev.data)); } catch { /* Ignore malformed messages. */ } };
     this.ws.onclose = () => {
       // 断线 3 秒后重连
-      setTimeout(() => this.connect(handlers), 3000);
+      handlers.onConnection?.(false);
+      if (!this.stopped) this.reconnectTimer = setTimeout(() => this.connect(handlers), 3000);
     };
   }
 
-  sendQrCancel(): void {
-    this.ws?.send(JSON.stringify({ type: 'qr_cancel', payload: null }));
+  sendQrCancel(attemptId: string): void {
+    if (this.unsubscribeDesktop) { void sessionApi.cancelLogin(attemptId).catch(() => undefined); return; }
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'qr_cancel', payload: { attemptId } }));
   }
 
   close(): void {
+    this.unsubscribeDesktop?.();
+    this.unsubscribeDesktop = null;
+    this.stopped = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    if (this.ws) this.ws.onclose = null;
     this.ws?.close();
     this.ws = null;
   }
 }
+
+http.interceptors.response.use(r => r, error => {
+  if (error.response?.status === 401 && !String(error.config?.url).startsWith('/auth/')) {
+    location.hash = '#/login'; location.reload();
+  }
+  return Promise.reject(error);
+});
+export function apiError(e: unknown): string { return (e as { response?: { data?: { error?: string } } }).response?.data?.error || '操作失败，请检查网络后重试'; }
+export interface NotificationChannel {
+  id: string; name: string; type: string; enabled: boolean; events: string[];
+  config: Record<string, string>; configured: Record<string, boolean>; lastStatus?: string; lastSentAt?: string;
+}
+export const notificationApi = { list: () => http.get<NotificationChannel[]>('/notifications').then(r => r.data) };

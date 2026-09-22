@@ -9,6 +9,8 @@ import { URLS, SEAT_INDEX, FIELD_INDEX, SEAT_NAMES } from './constants.js';
 import { DEFAULT_PRESALE_DAYS } from '../config.js';
 import { Logger } from '../logger.js';
 import type { TrainInfo } from '../types.js';
+import { TrainQueryError } from './train-query-error.js';
+import { today, addDays } from '../calendar/holidays.js';
 
 const logger = new Logger('bot');
 
@@ -22,7 +24,7 @@ interface QueryParams {
 /** 解析 leftTicket 的 result 字符串为车次信息 */
 export function parseTrainRow(row: string): TrainInfo | null {
   const f = row.split('|');
-  if (f.length < 30) return null;
+  if (f.length < 33) return null;
   const seats: Record<string, string> = {};
   for (const [code, idx] of Object.entries(SEAT_INDEX)) {
     const v = f[idx];
@@ -43,7 +45,7 @@ export function parseTrainRow(row: string): TrainInfo | null {
 /** 余票余量文本 → 数字（"有"→99, "无"→0, 数字→数字） */
 export function seatCount(text: string | undefined): number {
   if (!text) return 0;
-  if (text === '有' || text === '*') return 99;
+  if (text === '有') return 99;
   if (text === '无' || text === '') return 0;
   const n = Number(text);
   return Number.isFinite(n) ? n : 0;
@@ -51,10 +53,12 @@ export function seatCount(text: string | undefined): number {
 
 /** 在已登录的浏览器上下文中查询余票 */
 export async function queryTrains(context: BrowserContext, params: QueryParams): Promise<TrainInfo[]> {
+  const lastDate = addDays(today(), DEFAULT_PRESALE_DAYS);
+  if (params.trainDate > lastDate) throw new TrainQueryError(`${params.trainDate} 尚未开售，当前可查询至 ${lastDate}`);
   const { stationCode } = await import('./stations.js');
   const fromCode = await stationCode(params.fromStation);
   const toCode = await stationCode(params.toStation);
-  if (!fromCode || !toCode) throw new Error(`车站名无法解析：${params.fromStation} / ${params.toStation}`);
+  if (!fromCode || !toCode) throw new TrainQueryError('无法识别车站，请从站点搜索结果中选择');
 
   const url =
     `${URLS.LEFT_TICKET_QUERY}?leftTicketDTO.train_date=${params.trainDate}` +
@@ -66,9 +70,13 @@ export async function queryTrains(context: BrowserContext, params: QueryParams):
   try {
     // 先打开 kyfw 域查票页（而非 INDEX，后者会 303 到 www.12306.cn 导致跨域 fetch 失败），
     // 确保 cookie 域名就绪且 fetch 余票接口为同源
-    await page.goto(URLS.LEFT_TICKET_INIT, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => undefined);
+    await page.goto(URLS.LEFT_TICKET_INIT, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    if (new URL(page.url()).origin !== new URL(URLS.LEFT_TICKET_QUERY).origin) {
+      throw new TrainQueryError('12306 查询页面暂时不可用，请稍后刷新重试');
+    }
     const json = await page.evaluate(async (u: string) => {
-      const res = await fetch(u, { credentials: 'include' });
+      const res = await fetch(u, { credentials: 'include', signal: AbortSignal.timeout(15000) });
+      if (!res.ok) throw new Error(`余票接口 HTTP ${res.status}`);
       return res.text();
     }, url);
     const data = JSON.parse(json) as {
@@ -77,7 +85,7 @@ export async function queryTrains(context: BrowserContext, params: QueryParams):
       messages?: string[];
     };
     if (!data?.data?.result) {
-      throw new Error(`余票查询失败：${JSON.stringify(data.messages ?? data)}`);
+      throw new TrainQueryError('12306 暂未返回有效余票数据，请稍后刷新重试');
     }
     const map = data.data.map ?? {};
     const trains = data.data.result

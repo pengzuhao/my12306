@@ -1,9 +1,12 @@
 <script setup lang="ts">
+import ShareImageDialog from '../components/ShareImageDialog.vue';
+import type { ShareContent } from '../utils/share-image';
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { feishuApi, taskApi, ordersApi, calendarApi, type OrderRow, type HolidayDay } from '../api';
+import { notificationApi, taskApi, ordersApi, calendarApi, type OrderRow, type HolidayDay } from '../api';
 import { sessionState } from '../store/session';
 
-const feishu = ref<Record<string, unknown>>({});
+const activeChannels = ref(0);
+const shareContent = ref<ShareContent | null>(null);
 const stats = ref({ pending: 0, queried: 0, running: 0, success: 0, failed: 0 });
 const loading = ref(false);
 
@@ -225,11 +228,11 @@ async function fetchOrders(first: boolean): Promise<void> {
  */
 async function reloadStats(): Promise<void> {
   try {
-    const [feishuData, tasks] = (await Promise.all([feishuApi.get(), taskApi.list()])) as [
-      Record<string, unknown>,
+    const [channels, tasks] = (await Promise.all([notificationApi.list(), taskApi.list()])) as [
+      Array<{ enabled: boolean }>,
       Array<{ status: string }>,
     ];
-    feishu.value = feishuData;
+    activeChannels.value = channels.filter(c => c.enabled).length;
     stats.value = {
       pending: tasks.filter((t) => t.status === 'pending').length,
       queried: tasks.filter((t) => t.status === 'queried').length,
@@ -301,9 +304,9 @@ function onVisible(): void {
       </el-col>
       <el-col :span="6">
         <el-card class="page-card stat-card">
-          <div class="stat-title">飞书通知</div>
-          <div class="stat-value" :style="{ color: feishu.enabled ? '#67c23a' : '#909399' }">
-            {{ feishu.webhookUrl ? (feishu.enabled ? '已启用' : '已停用') : '未配置' }}
+          <div class="stat-title">通知通道</div>
+          <div class="stat-value" :style="{ color: activeChannels > 0 ? '#67c23a' : '#909399' }">
+            {{ activeChannels ? `${activeChannels} 个已启用` : '未启用' }}
           </div>
           <div class="stat-sub">购票成功将提醒付款</div>
         </el-card>
@@ -339,12 +342,13 @@ function onVisible(): void {
                 <span style="min-width: 104px; text-align: center; font-weight: 600; font-size: 13px">{{ calTitle }}</span>
                 <el-button size="small" @click="shiftMonth(1)">›</el-button>
                 <el-button size="small" text @click="calMonth = new Date()">今天</el-button>
+                <el-button size="small" plain :disabled="!!ordersError" @click="shareContent = { kind: 'calendar', year: calMonth.getFullYear(), month: calMonth.getMonth() + 1, tickets: paidOrders }">分享日历</el-button>
               </div>
             </div>
           </template>
 
           <div v-if="ordersError" style="color: #e6a23c; margin-bottom: 6px; font-size: 12px">
-            {{ ordersError }}（日历暂不可用，登录 12306 后刷新本页）
+            {{ ordersError }}（连接后刷新本页即可同步已购车票）
           </div>
           <el-alert
             v-if="calendarPending"
@@ -408,10 +412,10 @@ function onVisible(): void {
         <el-card class="page-card note-card">
           <template #header><b>系统说明</b></template>
           <ol class="note-list">
-            <li>在顶部「12306 账号」里用 12306 APP 扫码登录一次（全程不保存密码），之后自动保持在线。</li>
+            <li>点击顶部「连接 12306」用 12306 APP 扫码登录一次（全程不保存密码），之后自动保持在线。</li>
             <li>在「购票计划」创建计划：指定乘车人、日期规则、时间范围、车次与座位偏好。</li>
             <li>系统自动推算购票日期（节假日顺延并标注），并在<b>车票起售时刻</b>触发购买。</li>
-            <li>购票成功后<b>不会自动付款</b>，飞书会提醒你登录 12306 完成支付。</li>
+            <li>购票成功后<b>不会自动付款</b>，已启用的通知通道会提醒你登录 12306 完成支付。</li>
             <li>点击计划名称可查看它的执行历史和当前进度。</li>
           </ol>
           <el-alert type="warning" :closable="false" style="margin-top: 10px">
@@ -440,7 +444,9 @@ function onVisible(): void {
           <span>支付截止</span><span class="mono">{{ ticketDetail.payLimitTime }}</span>
         </div>
       </div>
+      <template #footer><el-button v-if="ticketDetail" type="primary" plain @click="shareContent = { kind: 'ticket', ticket: ticketDetail }">分享到微信</el-button></template>
     </el-dialog>
+    <ShareImageDialog :content="shareContent" @close="shareContent = null" />
   </div>
 </template>
 

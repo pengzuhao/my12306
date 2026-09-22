@@ -1,3 +1,4 @@
+import { MULTI_USER, SYSTEM_USER_ID } from '../config.js';
 import { nanoid } from 'nanoid';
 import type Database from 'better-sqlite3';
 import { getDb } from './index.js';
@@ -32,6 +33,7 @@ function rowToPlan(row: Record<string, unknown>): Plan {
     timeFrom: (row.time_from as string) ?? null,
     timeTo: (row.time_to as string) ?? null,
     trainNumbers: row.train_numbers ? JSON.parse(row.train_numbers as string) : null,
+    trainSegments: row.train_segments ? JSON.parse(row.train_segments as string) : [],
     seatPositions: row.seat_positions ? JSON.parse(row.seat_positions as string) : null,
     // 老计划可能没填席别，默认二等座（兼容历史数据）
     seatTypes: row.seat_types ? JSON.parse(row.seat_types as string) : ['ZE'],
@@ -67,6 +69,7 @@ export const UsersRepo = {
     if (!row) return null;
     const r = row as Record<string, unknown>;
     return {
+      disabled: Boolean(r.disabled),
       id: r.id as string,
       username: r.username as string,
       role: r.role as UserRole,
@@ -75,10 +78,11 @@ export const UsersRepo = {
     };
   },
   findById(id: string): AuthUser | null {
-    const row = getDb().prepare('SELECT id, username, role, display_name FROM users WHERE id = ?').get(id);
+    const row = getDb().prepare('SELECT id, username, role, display_name, disabled FROM users WHERE id = ?').get(id);
     if (!row) return null;
     const r = row as Record<string, unknown>;
     return {
+      disabled: Boolean(r.disabled),
       id: r.id as string,
       username: r.username as string,
       role: r.role as UserRole,
@@ -96,9 +100,10 @@ export const UsersRepo = {
   },
   list(): AuthUser[] {
     const rows = getDb()
-      .prepare('SELECT id, username, role, display_name FROM users ORDER BY created_at ASC')
+      .prepare('SELECT id, username, role, display_name, disabled FROM users ORDER BY created_at ASC')
       .all() as Record<string, unknown>[];
     return rows.map((r) => ({
+      disabled: Boolean(r.disabled),
       id: r.id as string,
       username: r.username as string,
       role: r.role as UserRole,
@@ -230,7 +235,7 @@ export const PlansRepo = {
     const sql = includeDeleted
       ? 'SELECT * FROM plans WHERE user_id = ? ORDER BY created_at DESC'
       : 'SELECT * FROM plans WHERE user_id = ? AND status != ? ORDER BY created_at DESC';
-    const rows = getDb().prepare(sql).all(userId, 'deleted') as Record<string, unknown>[];
+    const rows = getDb().prepare(sql).all(...(includeDeleted ? [userId] : [userId, 'deleted'])) as Record<string, unknown>[];
     return rows.map(rowToPlan);
   },
   get(id: string): Plan | null {
@@ -242,9 +247,9 @@ export const PlansRepo = {
     const now = new Date().toISOString();
     const json = <T>(v: T[] | null): string | null => (v ? JSON.stringify(v) : null);
     db.prepare(
-      `INSERT INTO plans (id, user_id, name, status, from_station, to_station, date_mode, travel_date, weekday, week_edge, week_interval, offset_days, valid_from, valid_until, time_from, time_to, train_numbers, seat_positions, seat_types, allow_no_seat, passenger_ids, created_at, updated_at)
-       VALUES (@id, @user_id, @name, @status, @from_station, @to_station, @date_mode, @travel_date, @weekday, @week_edge, @week_interval, @offset_days, @valid_from, @valid_until, @time_from, @time_to, @train_numbers, @seat_positions, @seat_types, @allow_no_seat, @passenger_ids, @created_at, @updated_at)
-       ON CONFLICT(id) DO UPDATE SET name = excluded.name, status = excluded.status, from_station = excluded.from_station, to_station = excluded.to_station, date_mode = excluded.date_mode, travel_date = excluded.travel_date, weekday = excluded.weekday, week_edge = excluded.week_edge, week_interval = excluded.week_interval, offset_days = excluded.offset_days, valid_from = excluded.valid_from, valid_until = excluded.valid_until, time_from = excluded.time_from, time_to = excluded.time_to, train_numbers = excluded.train_numbers, seat_positions = excluded.seat_positions, seat_types = excluded.seat_types, allow_no_seat = excluded.allow_no_seat, passenger_ids = excluded.passenger_ids, updated_at = excluded.updated_at`,
+      `INSERT INTO plans (id, user_id, name, status, from_station, to_station, date_mode, travel_date, weekday, week_edge, week_interval, offset_days, valid_from, valid_until, time_from, time_to, train_numbers, train_segments, seat_positions, seat_types, allow_no_seat, passenger_ids, created_at, updated_at)
+       VALUES (@id, @user_id, @name, @status, @from_station, @to_station, @date_mode, @travel_date, @weekday, @week_edge, @week_interval, @offset_days, @valid_from, @valid_until, @time_from, @time_to, @train_numbers, @train_segments, @seat_positions, @seat_types, @allow_no_seat, @passenger_ids, @created_at, @updated_at)
+       ON CONFLICT(id) DO UPDATE SET name = excluded.name, status = excluded.status, from_station = excluded.from_station, to_station = excluded.to_station, date_mode = excluded.date_mode, travel_date = excluded.travel_date, weekday = excluded.weekday, week_edge = excluded.week_edge, week_interval = excluded.week_interval, offset_days = excluded.offset_days, valid_from = excluded.valid_from, valid_until = excluded.valid_until, time_from = excluded.time_from, time_to = excluded.time_to, train_numbers = excluded.train_numbers, train_segments = excluded.train_segments, seat_positions = excluded.seat_positions, seat_types = excluded.seat_types, allow_no_seat = excluded.allow_no_seat, passenger_ids = excluded.passenger_ids, updated_at = excluded.updated_at`,
     ).run({
       id: plan.id,
       user_id: plan.userId,
@@ -263,6 +268,7 @@ export const PlansRepo = {
       time_from: plan.timeFrom,
       time_to: plan.timeTo,
       train_numbers: json(plan.trainNumbers),
+      train_segments: JSON.stringify(plan.trainSegments ?? []),
       seat_positions: json(plan.seatPositions),
       seat_types: JSON.stringify(plan.seatTypes),
       allow_no_seat: plan.allowNoSeat ? 1 : 0,
@@ -277,7 +283,7 @@ export const PlansRepo = {
   },
   listActive(): Plan[] {
     const rows = getDb()
-      .prepare(`SELECT * FROM plans WHERE status = 'active' ORDER BY user_id, created_at`)
+      .prepare(`SELECT * FROM plans WHERE status = 'active' AND ${eligibleUserSql('plans')} ORDER BY user_id, created_at`)
       .all() as Record<string, unknown>[];
     return rows.map(rowToPlan);
   },
@@ -298,6 +304,14 @@ export const PlanDatesRepo = {
       // 清理本次不再推算且尚未出行的旧条目（如规则/日历变化后本周已被跳过）。
       // 已完成（done）的保留为历史记录。
       const keep = entries.map((e) => e.travelDate);
+      // 日期规则修正后，旧的待执行任务也必须退出队列；已运行/已完成的保留。
+      const reason = '计划日期已重新推算，该日期不再符合当前规则';
+      db.prepare(`UPDATE tasks SET status = 'skipped', error = ?, finished_at = datetime('now'), updated_at = datetime('now')
+        WHERE plan_id = ? AND status IN ('pending', 'queried') AND travel_date NOT IN (SELECT value FROM json_each(?))`)
+        .run(reason, planId, JSON.stringify(keep));
+      db.prepare(`UPDATE tasks SET status = 'pending', error = NULL, sale_at = NULL, finished_at = NULL, updated_at = datetime('now')
+        WHERE plan_id = ? AND status = 'skipped' AND error = ? AND travel_date IN (SELECT value FROM json_each(?))`)
+        .run(planId, reason, JSON.stringify(keep));
       db.prepare(
         `DELETE FROM plan_dates WHERE plan_id = ? AND status = 'pending' AND travel_date NOT IN (SELECT value FROM json_each(?))`,
       ).run(planId, JSON.stringify(keep));
@@ -328,6 +342,16 @@ export const PlanDatesRepo = {
 };
 
 export const TasksRepo = {
+  /** Only call at process startup, before any task can execute. Never retry an uncertain order automatically. */
+  recoverInterrupted(): number {
+    return getDb().prepare(`UPDATE tasks
+      SET status = 'failed', error = '执行中断：服务已重启，请先核对 12306 订单；确认未购票后再重试',
+          finished_at = ?, updated_at = datetime('now')
+      WHERE status IN ('running', 'queued')`).run(new Date().toISOString()).changes;
+  },
+  listSuccessful(userId: string): Task[] {
+    return (getDb().prepare("SELECT * FROM tasks WHERE user_id = ? AND status = 'success' AND result IS NOT NULL").all(userId) as Record<string, unknown>[]).map(rowToTask);
+  },
   list(userId: string, limit = 50): Task[] {
     const rows = getDb()
       .prepare('SELECT * FROM tasks WHERE user_id = ? ORDER BY created_at DESC LIMIT ?')
@@ -395,8 +419,9 @@ export const TasksRepo = {
         `SELECT * FROM tasks
          WHERE status IN ('queried')
            AND sale_at IS NOT NULL
-           AND sale_at <= ?
-         ORDER BY sale_at ASC
+           AND julianday(sale_at) <= julianday(?)
+           AND ${eligibleUserSql('tasks')} AND EXISTS (SELECT 1 FROM plans WHERE plans.id = tasks.plan_id AND plans.status = 'active')
+         ORDER BY julianday(sale_at) ASC
          LIMIT ?`,
       )
       .all(now, limit) as Record<string, unknown>[];
@@ -404,7 +429,7 @@ export const TasksRepo = {
   },
   listPending(limit = 50): Task[] {
     const rows = getDb()
-      .prepare(`SELECT * FROM tasks WHERE status = 'pending' ORDER BY travel_date ASC, created_at ASC LIMIT ?`)
+      .prepare(`SELECT * FROM tasks WHERE status = 'pending' AND ${eligibleUserSql('tasks')} AND EXISTS (SELECT 1 FROM plans WHERE plans.id = tasks.plan_id AND plans.status = 'active') ORDER BY travel_date ASC, created_at ASC LIMIT ?`)
       .all(limit) as Record<string, unknown>[];
     return rows.map(rowToTask);
   },
@@ -442,3 +467,11 @@ export const LogsRepo = {
     return getDb().prepare(sql).all(...params) as Record<string, unknown>[];
   },
 };
+
+/** 单用户启动不会执行其他用户的计划；禁用账号不会继续调度。 */
+export function eligibleUserSql(table: string): string {
+  return `EXISTS (SELECT 1 FROM users WHERE users.id = ${table}.user_id AND users.disabled = 0${MULTI_USER ? '' : " AND users.id = 'system'"})`;
+}
+export function userCanRun(userId: string): boolean {
+  return (!MULTI_USER ? userId === SYSTEM_USER_ID : true) && !!getDb().prepare('SELECT id FROM users WHERE id = ? AND disabled = 0').get(userId);
+}

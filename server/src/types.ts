@@ -4,6 +4,7 @@ export interface AuthUser {
   username: string;
   role: UserRole;
   displayName: string;
+  disabled?: boolean;
 }
 
 export type UserRole = 'admin' | 'user';
@@ -34,6 +35,12 @@ export interface FeishuConfig {
 }
 
 /** 购票计划 */
+export interface TrainSegment {
+  trainCode: string;
+  fromStation: string;
+  toStation: string;
+}
+
 export interface Plan {
   id: string;
   userId: string;
@@ -59,6 +66,7 @@ export interface Plan {
   timeTo: string | null;
   /** 具体车次列表（可空 = 按时间范围自动匹配） */
   trainNumbers: string[] | null;
+  trainSegments?: TrainSegment[];
   /** 座位偏好 A/B/C/D/F（可空 = 不指定） */
   seatPositions: string[] | null;
   /** 席别（必选多选，如 ZE 二等座 / ZY 一等座）：订票严格按所选席别匹配，不回退未选席别 */

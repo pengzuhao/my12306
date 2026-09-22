@@ -1,0 +1,20 @@
+{
+  "name": "my12306-desktop",
+  "productName": "my12306",
+  "version": "1.0.0",
+  "description": "12306 车票日历、购票计划与通知",
+  "author": "my12306 contributors",
+  "private": true,
+  "main": "main/main.cjs",
+  "dependencies": {
+    "@fastify/static": "10.1.4",
+    "@fastify/websocket": "11.3.0",
+    "bcryptjs": "2.4.3",
+    "better-sqlite3": "13.0.3",
+    "fastify": "5.12.5",
+    "jsonwebtoken": "9.0.3",
+    "nanoid": "5.1.16",
+    "playwright": "1.63.0",
+    "zod": "3.25.76"
+  }
+}

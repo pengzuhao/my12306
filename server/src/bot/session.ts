@@ -1,10 +1,11 @@
+import { userCanRun } from '../db/repo.js';
 /**
  * 12306 会话管理（需求 3）。
  *
  * - 不保存 12306 密码：采用「扫码登录」，全程不接触任何密码，也不需要手机号验证码。
  * - 二维码通过 WebSocket 实时推送给管理台，用户用 12306 APP 扫码确认。
  * - 登录成功后持久化浏览器会话（launchPersistentContext 的 user-data-dir 自动落盘），
- *   并由保活循环周期性验证；失活时通过飞书通知用户重新登录。
+ *   并由保活循环周期性验证；失活时通过通过通知通道提醒用户重新登录。
  */
 import type { BrowserContext, Page } from 'playwright';
 import { RailwayAccountRepo } from '../db/repo.js';
@@ -13,44 +14,74 @@ import { wsHub } from '../ws/hub.js';
 import { URLS, SELECTORS } from './constants.js';
 import { createContextForUser, closeContext, saveStorageState } from './browser.js';
 import { notifySessionInvalid } from '../notify/feishu.js';
+import { QrAttempt, runQrLogin, type QrSnapshot } from './qr-login.js';
 import type { SessionState } from '../types.js';
 
 const logger = new Logger('session');
 
 /** userId → 活跃浏览器上下文 */
 const contexts = new Map<string, BrowserContext>();
+const openingContexts = new Map<string, Promise<BrowserContext>>();
 
-/** 二维码登录交互通道：userId → 取消函数（用户在管理台点"取消"时调用） */
-interface QrChallenge {
-  cancel: () => void;
+const qrChallenges = new Map<string, QrAttempt>();
+const finishedQrAttempts = new WeakSet<QrAttempt>();
+
+export function getQrLogin(userId: string, attemptId: string): QrSnapshot | null {
+  const attempt = qrChallenges.get(userId);
+  return attempt?.snapshot.attemptId === attemptId ? attempt.snapshot : null;
 }
-const qrChallenges = new Map<string, QrChallenge>();
-
-/** 通过 WS 把二维码推送给管理台 */
-function pushQrToUser(userId: string, image: string, status: string): void {
-  wsHub.broadcastToUser(userId, { type: 'qr_code', payload: { image, status } });
+export function refreshQrLogin(userId: string, attemptId: string): boolean {
+  const attempt = qrChallenges.get(userId);
+  return !!attempt && attempt.snapshot.attemptId === attemptId && attempt.refresh();
 }
-
-/** 用户在管理台取消扫码登录 */
-export function cancelQrLogin(userId: string): void {
-  const challenge = qrChallenges.get(userId);
-  if (challenge) {
-    qrChallenges.delete(userId);
-    challenge.cancel();
-  }
+export function setQrAutoRefresh(userId: string, attemptId: string, enabled: boolean): boolean {
+  const attempt = qrChallenges.get(userId);
+  if (!attempt || attempt.snapshot.attemptId !== attemptId || attempt.cancelled) return false;
+  attempt.update({ autoRefresh: enabled });
+  return true;
+}
+/** An attempt ID prevents an old tab/request from cancelling a newer login. */
+export function cancelQrLogin(userId: string, attemptId?: string): void {
+  const attempt = qrChallenges.get(userId);
+  if (attempt && (!attemptId || attempt.snapshot.attemptId === attemptId)) attempt.cancel();
 }
 
 /** 获取/创建用户的浏览器上下文 */
 export async function getContext(userId: string): Promise<BrowserContext> {
-  let ctx = contexts.get(userId);
-  if (ctx) return ctx;
-  ctx = await createContextForUser({ userId });
-  contexts.set(userId, ctx);
-  return ctx;
+  if (!userCanRun(userId)) throw new Error('账号已停用或当前启动模式不允许访问');
+  const current = contexts.get(userId);
+  if (current) return current;
+  const opening = openingContexts.get(userId);
+  if (opening) return opening;
+  const promise = createContextForUser({ userId }).then(async ctx => {
+    if (!userCanRun(userId)) { await closeContext(ctx); throw new Error('账号已停用'); }
+    contexts.set(userId, ctx);
+    ctx.on('close', () => { if (contexts.get(userId) === ctx) contexts.delete(userId); });
+    return ctx;
+  });
+  openingContexts.set(userId, promise);
+  try {
+    return await promise;
+  } finally {
+    openingContexts.delete(userId);
+  }
+}
+
+/** 服务重启时保存并关闭浏览器，不把已登录账户改成退出状态。 */
+export async function shutdownSessions(): Promise<void> {
+  stopKeepalive();
+  for (const userId of qrChallenges.keys()) cancelQrLogin(userId);
+  await Promise.allSettled(openingContexts.values());
+  await Promise.allSettled([...contexts.entries()].map(async ([userId, ctx]) => {
+    await saveStorageState(ctx, userId);
+    await closeContext(ctx);
+  }));
+  contexts.clear();
 }
 
 /** 关闭用户会话 */
 export async function closeSession(userId: string): Promise<void> {
+  cancelQrLogin(userId);
   const ctx = contexts.get(userId);
   if (ctx) {
     await closeContext(ctx);
@@ -105,119 +136,92 @@ export function getSessionState(userId: string): SessionState {
   };
 }
 
-/** 正在登录中的用户（并发锁，防止重复发起） */
-const loggingInUsers = new Set<string>();
-
-/**
- * 交互式登录 12306（扫码登录，全程不保存密码、不需要手机号）。
- *
- * 流程：
- *   1. 打开 12306 登录页，切换到「扫码登录」页签；
- *   2. 读取二维码图片（data URI），通过 WebSocket 实时推送到管理台；
- *   3. 轮询登录状态，用户用 12306 APP 扫码确认后页面跳转，即登录成功；
- *   4. 二维码失效时自动点击「刷新」并重新推送；用户可在管理台取消。
- *
- * @param userId 系统用户 ID
- */
-export async function loginInteractive(userId: string): Promise<SessionState> {
-  if (loggingInUsers.has(userId)) {
-    throw new Error('登录正在进行中，请稍候或在弹窗中扫码');
+/** Starts synchronously: cancellation and refresh are available even while Chromium is opening. */
+export function startQrLogin(userId: string, attemptId: string, autoRefresh = true): QrSnapshot {
+  const current = qrChallenges.get(userId);
+  if (current && !finishedQrAttempts.has(current)) {
+    if (current.snapshot.attemptId === attemptId) return current.snapshot;
+    throw new Error('上一次登录正在处理，请稍候重试');
   }
-  loggingInUsers.add(userId);
-  RailwayAccountRepo.upsert(userId, null);
-  RailwayAccountRepo.updateStatus(userId, 'logging_in');
-  wsHub.broadcastToUser(userId, { type: 'session', payload: getSessionState(userId) });
+  if (!userCanRun(userId)) throw new Error('账号已停用或当前启动模式不允许访问');
+  const attempt = new QrAttempt(attemptId, autoRefresh, snapshot => wsHub.broadcastToUser(userId, { type: 'qr_code', payload: snapshot }));
+  qrChallenges.set(userId, attempt);
+  void executeQrLogin(userId, attempt);
+  return attempt.snapshot;
+}
 
-  const context = await getContext(userId);
-  const page = await context.newPage();
-  let cancelled = false;
-  let lastQr = '';
+async function executeQrLogin(userId: string, attempt: QrAttempt): Promise<void> {
+  let page: Page | null = null;
+  let context: BrowserContext | null = null;
+  const sendSession = () => wsHub.broadcastToUser(userId, { type: 'session', payload: { ...getSessionState(userId), loginAttemptId: attempt.snapshot.attemptId } });
+  attempt.onCancel = () => { void page?.close().catch(() => undefined); };
+  const openQrPage = async () => {
+    if (!page || attempt.cancelled) return;
+    await page.goto(URLS.LOGIN, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    if (attempt.cancelled) return;
+    await page.locator(SELECTORS.qrLoginTab).click({ timeout: 10000 });
+    await page.waitForFunction("document.querySelector('#J-qrImg')?.src.startsWith('data:')", undefined, { timeout: 15000 });
+  };
   try {
-    logger.info('开始扫码登录（不保存密码）');
-    await page.goto(URLS.LOGIN, { waitUntil: 'domcontentloaded', timeout: 40000 });
-    logger.info('登录页已打开', { url: page.url() });
-
-    // 等页面 JS 渲染完登录表单
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => undefined);
-    logger.info('登录页已就绪', { url: page.url() });
-
-    // 切换到「扫码登录」页签
-    await page.click(SELECTORS.qrLoginTab).catch(() => undefined);
-    await page.waitForTimeout(1000);
-    logger.info('已切换到扫码登录页签', { url: page.url() });
-
-    // 注册取消通道
-    qrChallenges.set(userId, {
-      cancel: () => {
-        cancelled = true;
+    RailwayAccountRepo.upsert(userId, null);
+    RailwayAccountRepo.updateStatus(userId, 'logging_in');
+    sendSession();
+    await runQrLogin(attempt, {
+      open: async () => {
+        context = await getContext(userId);
+        if (attempt.cancelled) return;
+        page = await context.newPage();
+        if (!attempt.cancelled) await openQrPage();
+      },
+      read: async () => {
+        if (!page || !context || attempt.cancelled) return { image: null, expired: false, scanned: false, loggedIn: false };
+        const url = page.url();
+        if (!url.includes('/login/') && !url.includes('login.html') && await checkLoggedIn(context)) return { image: null, expired: false, scanned: false, loggedIn: true };
+        return {
+          image: await readQrImage(page),
+          scanned: await page.locator('#J-login-code-success').isVisible(),
+          expired: await page.locator('#J-code-error').isVisible(),
+          loggedIn: false,
+        };
+      },
+      refresh: async manual => {
+        if (!page || attempt.cancelled) return;
+        // Re-check immediately before changing the page: the phone may just have scanned it.
+        if (await page.locator('#J-login-code-success').isVisible()) return;
+        if (!manual && await page.locator('#J-code-error a').isVisible()) {
+          await page.locator('#J-code-error a').click({ timeout: 2500 });
+        } else {
+          // Reload also clears the official page's previous QR polling timer.
+          await openQrPage();
+        }
+      },
+      complete: async () => {
+        const railwayUser = await readRailwayUserName(page!).catch(() => null);
+        if (attempt.cancelled) return;
+        await saveStorageState(context!, userId);
+        if (attempt.cancelled) return;
+        if (railwayUser) RailwayAccountRepo.upsert(userId, railwayUser);
+        RailwayAccountRepo.updateStatus(userId, 'active');
+        sendSession();
+        logger.info('扫码登录成功，会话已保存并开始保活', { user: userId });
       },
     });
-
-    // 先等二维码元素出现（最多 20 秒），再进入轮询
-    await page.waitForSelector(SELECTORS.qrImage, { timeout: 20000 }).catch(() => undefined);
-
-    // 轮询：推二维码 + 检测登录成功/取消，最多 5 分钟
-    const deadline = Date.now() + 5 * 60 * 1000;
-    let pushedAt = 0;
-    while (Date.now() < deadline && !cancelled) {
-      // 读取二维码 data URI（页面里是 <img id="J-qrImg" src="data:image/jpg;base64,...">）
-      const qr = await readQrImage(page);
-      if (qr && qr !== lastQr) {
-        lastQr = qr;
-        pushedAt = Date.now();
-        pushQrToUser(userId, qr, '请使用 12306 APP 扫码登录');
-        logger.info('已推送登录二维码到管理台');
-      }
-
-      // 二维码约 1 分钟过期：超过 90 秒未更新则点「刷新」重新生成
-      if (qr && Date.now() - pushedAt > 90_000) {
-        await page.click(SELECTORS.qrRefresh).catch(() => undefined);
-        await page.waitForTimeout(800);
-        const fresh = await readQrImage(page);
-        if (fresh && fresh !== lastQr) {
-          lastQr = fresh;
-          pushedAt = Date.now();
-          pushQrToUser(userId, fresh, '二维码已刷新，请使用 12306 APP 扫码登录');
-        }
-      }
-
-      // 检测登录成功：扫码确认后页面会跳转离开登录页
-      const url = page.url();
-      if (!url.includes('/login/') && !url.includes('login.html')) {
-        const ok = await checkLoggedIn(context);
-        if (ok) {
-          // 读取 12306 登录用户名（仅展示用，不保存密码）
-          const railwayUser = await readRailwayUserName(page).catch(() => null);
-          if (railwayUser) RailwayAccountRepo.upsert(userId, railwayUser);
-          RailwayAccountRepo.updateStatus(userId, 'active');
-          // 主动落盘登录态，进程重启后可恢复
-          await saveStorageState(context, userId);
-          logger.info('扫码登录成功，会话已保存并开始保活', railwayUser ? { railwayUser } : undefined);
-          wsHub.broadcastToUser(userId, { type: 'session', payload: getSessionState(userId) });
-          return getSessionState(userId);
-        }
-      }
-      await page.waitForTimeout(1500);
+    if (attempt.cancelled) { RailwayAccountRepo.updateStatus(userId, 'logged_out'); sendSession(); }
+  } catch (error) {
+    if (!attempt.cancelled && attempt.snapshot.phase !== 'error') {
+      attempt.update({ phase: 'error', image: null, status: error instanceof Error ? error.message : '二维码获取失败，请重试' });
     }
-
-    if (cancelled) {
-      RailwayAccountRepo.updateStatus(userId, 'invalid', '用户已取消登录');
-      wsHub.broadcastToUser(userId, { type: 'session', payload: getSessionState(userId) });
-      throw new Error('用户已取消登录');
-    }
-    RailwayAccountRepo.updateStatus(userId, 'invalid', '扫码登录超时，请重试');
-    wsHub.broadcastToUser(userId, { type: 'session', payload: getSessionState(userId) });
-    throw new Error('扫码登录超时，请重试');
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    RailwayAccountRepo.updateStatus(userId, 'invalid', msg);
-    logger.error('登录异常', e);
-    wsHub.broadcastToUser(userId, { type: 'session', payload: getSessionState(userId) });
-    throw e;
+    RailwayAccountRepo.updateStatus(userId, 'invalid', attempt.snapshot.status);
+    sendSession();
+    logger.warn('扫码登录失败', { user: userId, error: error instanceof Error ? error.message : String(error) });
   } finally {
-    qrChallenges.delete(userId);
-    await page.close().catch(() => undefined);
-    loggingInUsers.delete(userId);
+    await (page as Page | null)?.close().catch(() => undefined);
+    finishedQrAttempts.add(attempt);
+    // Keep terminal state briefly for polling clients that missed the WebSocket event.
+    const timer = setTimeout(() => {
+      if (qrChallenges.get(userId) === attempt) qrChallenges.delete(userId);
+    }, 30_000);
+    timer.unref();
   }
 }
 
@@ -278,6 +282,7 @@ export function startKeepalive(intervalMs = 10 * 60 * 1000): void {
     const { getDb } = await import('../db/index.js');
     const rows = getDb().prepare("SELECT user_id FROM railway_accounts WHERE status = 'active'").all() as Array<{ user_id: string }>;
     for (const { user_id } of rows) {
+      if (!userCanRun(user_id)) continue;
       const ctx = contexts.get(user_id);
       if (!ctx) continue;
       try {
@@ -287,10 +292,10 @@ export function startKeepalive(intervalMs = 10 * 60 * 1000): void {
           // 检查通过说明登录态有效，顺手落盘保持新鲜
           await saveStorageState(ctx, user_id);
         } else {
-          logger.warn('会话失活，飞书通知用户重新登录', { user: user_id });
+          logger.warn('会话失活，通过通知通道提醒用户重新登录', { user: user_id });
           RailwayAccountRepo.updateStatus(user_id, 'invalid', '会话过期或被踢下线');
           wsHub.broadcastToUser(user_id, { type: 'session', payload: getSessionState(user_id) });
-          await notifySessionInvalid(user_id, '会话过期或在其他设备登录，请重新输入账号密码登录');
+          await notifySessionInvalid(user_id, '会话过期或在其他设备登录，请重新扫码登录');
         }
       } catch (e) {
         logger.warn('保活检查失败', { user: user_id, error: e });

@@ -30,3 +30,10 @@ admin/src-tauri/gen/
 
 # WorkBuddy 工作区数据（记忆/任务，非产品代码）
 .workbuddy/
+
+# Desktop staging and installers
+desktop/app/main/
+desktop/app/server/
+desktop/app/web/
+desktop/.cache/
+desktop/release/

@@ -3,6 +3,7 @@
 # my12306 一键启动脚本
 #
 #   ./start.sh            前台启动（Ctrl+C 停止）
+#   ./start.sh --multi-user [start|-d]  启用管理员多用户模式
 #   ./start.sh -d         后台启动，日志写入 .run/my12306.log
 #   ./start.sh stop       停止后台服务
 #   ./start.sh restart    重启后台服务
@@ -12,6 +13,9 @@
 # 可选环境变量：
 #   MY12306_PORT=7788           服务端口
 #   MY12306_HOST=127.0.0.1      监听地址（外网访问改 0.0.0.0）
+#   MY12306_MULTI_USER=1       启用管理员多用户模式（默认关闭）
+#   MY12306_ADMIN_USER=admin   首次启用时的管理员账号
+#   MY12306_ADMIN_PASSWORD     首次启用时设置，至少 12 字符
 #   MY12306_NO_OPEN=1           启动后不自动打开浏览器
 #
 set -euo pipefail
@@ -128,7 +132,7 @@ start_foreground() {
 
   info "Node          : $("$NODE_BIN" -v)  ($NODE_BIN)"
   info "管理台地址    : $BASE_URL"
-  info "单用户模式    : 无需登录，打开后请在顶栏「12306 账号」里扫码登录 12306"
+  mode_notice
   info "按 Ctrl+C 停止服务"
   echo
 
@@ -156,7 +160,7 @@ start_daemon() {
   if wait_ready; then
     port_pid >"$PID_FILE" 2>/dev/null || true
     info "启动成功：$BASE_URL"
-    info "单用户模式：无需登录，请在顶栏「12306 账号」里扫码登录 12306"
+    mode_notice
     info "日志：$LOG_FILE"
     info "停止：$0 stop"
     open_browser
@@ -193,24 +197,8 @@ stop_daemon() {
     kill -9 "$pid" 2>/dev/null || true
   fi
 
-  # node 退出后，Playwright 拉起的 Chromium 子进程可能成为孤儿继续驻留，
-  # 它们仍占着 browser-profile 的句柄/锁，下次启动时持久化上下文会失败
-  # （表现为车次查询等依赖浏览器的接口 page.evaluate: Failed to fetch）。
-  # 这里按命令行里的 profile 路径匹配回收，仅限本项目的 profile 目录，避免误杀。
-  local orphan
-  orphan="$(pgrep -f "browser-profile/${SYSTEM_USER_ID:-system}" 2>/dev/null || true)"
-  if [ -n "$orphan" ]; then
-    warn "发现残留浏览器进程（${orphan//$'\n'/ }），正在回收..."
-    # shellcheck disable=SC2086
-    kill $orphan 2>/dev/null || true
-    for i in $(seq 1 10); do
-      # pgrep 没匹配到任何进程时会返回非零，这里不能依赖它的退出码
-      [ -z "$(pgrep -f "browser-profile/${SYSTEM_USER_ID:-system}" 2>/dev/null || true)" ] && break
-      sleep 0.3
-    done
-    # shellcheck disable=SC2086
-    kill -9 $orphan 2>/dev/null || true
-  fi
+  # 后端负责保存登录态和关闭 Chromium。不要按通用 profile 名杀进程：
+  # 同时运行的桌面版也有 system profile，必须保持互不影响。
 
   rm -f "$PID_FILE"
   info "已停止"
@@ -224,7 +212,19 @@ show_status() {
   fi
 }
 
+mode_notice() {
+  if [ "${MY12306_MULTI_USER:-0}" = "1" ]; then
+    info "多用户模式：请先登录管理台，再连接自己的 12306 账号"
+  else
+    info "本地单用户模式：点击顶栏「连接 12306」扫码登录"
+  fi
+}
+
 # ---------- 入口 ----------
+if [ "${1:-}" = "--multi-user" ]; then
+  export MY12306_MULTI_USER=1
+  shift
+fi
 
 case "${1:-start}" in
   -d|--daemon|daemon)
