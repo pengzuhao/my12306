@@ -8,6 +8,7 @@ const routes: RouteRecordRaw[] = [
     children: [
       { path: 'dashboard', name: 'dashboard', component: () => import('../views/DashboardView.vue') },
       { path: 'orders', name: 'orders', component: () => import('../views/OrdersView.vue') },
+      { path: 'trains', name: 'trains', component: () => import('../views/TrainsView.vue') },
       { path: 'plans', name: 'plans', component: () => import('../views/PlansView.vue') },
       // 「12306 会话」已融合进顶栏，旧书签自动跳转过去
       { path: 'session', redirect: '/dashboard' },

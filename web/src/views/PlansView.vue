@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
+import { useRouter } from 'vue-router';
 import {
   planApi,
   passengerApi,
@@ -12,6 +13,8 @@ import {
   type TaskSnapshot,
   type SeatTypeOption,
 } from '../api';
+
+const router = useRouter();
 
 interface Passenger {
   id: string;
@@ -25,16 +28,13 @@ interface Plan extends PlanForm {
   status: string;
 }
 
-// ---- 席别与车次：从 12306 透传，不写死在前端 ----
+// ---- 席别：从 12306 透传，不写死在前端 ----
 /** 席别选项（后端来自 12306 余票字段映射） */
 const seatTypeOptions = ref<SeatTypeOption[]>([]);
 /** 席别代码 → 中文名映射（由透传的选项派生，不在前端写死） */
 const seatTypeNameMap = computed<Record<string, string>>(() =>
   Object.fromEntries(seatTypeOptions.value.map((s) => [s.code, s.name])),
 );
-/** 车次搜索：远程加载真实可购车次（需登录 12306） */
-const trainLoading = ref(false);
-const trainOptions = ref<Array<{ code: string; label: string }>>([]);
 
 const plans = ref<Plan[]>([]);
 const passengers = ref<Passenger[]>([]);
@@ -241,48 +241,32 @@ async function searchStations(keyword: string, cb: (items: Array<{ value: string
 }
 
 /**
- * 查询真实可购车次（从 12306 透传）。需已登录 12306。
- * 查到后自动把席别选项收窄为"这些车次实际有的席别"，避免选了不存在的席别。
+ * 跳转到独立的车次查询页。
+ *
+ * 车次查询依赖 12306 实时余票（需要登录态、受预售期限制），
+ * 放在独立页面里查更清晰，也避免在计划弹窗里套一层浏览器交互。
+ * 查到后可在车次页直接「加入计划」跳回来，并把站点/日期/车次带过来。
  */
-async function searchTrains(): Promise<void> {
-  if (!editing.fromStation || !editing.toStation) {
-    ElMessage.warning('请先填写出发站和到达站');
-    return;
-  }
+function gotoTrainSearch(): void {
   const date = editing.dateMode === 'single' ? editing.travelDate : editing.validFrom;
-  if (!date) {
-    ElMessage.warning('请先选择乘车日期或生效日期');
-    return;
-  }
-  trainLoading.value = true;
-  try {
-    const res = await metaApi.trains(editing.fromStation, editing.toStation, date);
-    trainOptions.value = res.trains.map((t) => ({
-      code: t.trainCode,
-      label: `${t.trainCode} ${t.fromStation}→${t.toStation} ${t.departTime}→${t.arriveTime}（${t.duration}）`,
-    }));
-    if (!res.trains.length) {
-      ElMessage.warning('该日期/区间的车次暂不可查（可能未到预售期或无直达车）');
-    } else {
-      ElMessage.success(`查到 ${res.trains.length} 趟车次`);
-    }
-  } catch (e) {
-    ElMessage.error((e as { response?: { data?: { error?: string } } }).response?.data?.error ?? '车次查询失败');
-  } finally {
-    trainLoading.value = false;
-  }
+  router.push({
+    path: '/trains',
+    query: {
+      from: editing.fromStation || undefined,
+      to: editing.toStation || undefined,
+      date: date || undefined,
+    },
+  });
 }
 
 function openNew(): void {
   Object.assign(editing, emptyForm());
   editing.passengerIds = passengers.value.length ? [passengers.value[0].id] : [];
-  trainOptions.value = [];
   dialogVisible.value = true;
 }
 
 function openEdit(p: Plan): void {
   Object.assign(editing, JSON.parse(JSON.stringify(p)));
-  trainOptions.value = (p.trainNumbers ?? []).map((code) => ({ code, label: code }));
   dialogVisible.value = true;
 }
 
@@ -320,10 +304,10 @@ async function confirmDelete(id: string): Promise<void> {
 }
 
 /**
- * 操作栏「更多」下拉的命令分发。
+ * 操作栏「操作」下拉的命令分发。
  *
- * 操作栏只保留一个主操作（详情）+ 一个下拉菜单（编辑 / 暂停·恢复 / 删除），
- * 避免一行挤 5 个按钮；危险操作（删除）走二次确认。
+ * 详情通过点击计划名称链接打开，操作栏只留编辑/暂停·恢复/删除，
+ * 危险操作（删除）走二次确认。
  */
 async function handlePlanCommand(cmd: string, row: Plan): Promise<void> {
   switch (cmd) {
@@ -456,6 +440,27 @@ onMounted(async () => {
       { code: 'YZ', name: '硬座' },
     ];
   }
+
+  // 从车次查询页「加入计划」带过来的条件：预填站点/日期/车次并直接打开新建弹窗
+  const q = router.currentRoute.value.query;
+  const from = q.from ? String(q.from) : '';
+  const to = q.to ? String(q.to) : '';
+  const date = q.date ? String(q.date) : '';
+  const train = q.train ? String(q.train) : '';
+  if (from || to || train) {
+    Object.assign(editing, emptyForm());
+    if (from) editing.fromStation = from;
+    if (to) editing.toStation = to;
+    if (train) editing.trainNumbers = [train];
+    if (date) {
+      editing.dateMode = 'single';
+      editing.travelDate = date;
+    }
+    editing.passengerIds = passengers.value.length ? [passengers.value[0].id] : [];
+    dialogVisible.value = true;
+    // 用完即清，刷新页面不会重复弹出
+    router.replace({ path: '/plans', query: {} });
+  }
 });
 </script>
 
@@ -514,22 +519,19 @@ onMounted(async () => {
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="130" fixed="right">
+        <el-table-column label="操作" width="90" fixed="right">
           <template #default="{ row }">
-            <div class="plan-actions">
-              <el-button size="small" type="primary" plain @click="openDetail(row)">详情</el-button>
-              <el-dropdown trigger="click" @command="(cmd: string) => void handlePlanCommand(cmd, row)">
-                <el-button size="small" plain>更多<span class="plan-caret" /></el-button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item command="edit">编辑</el-dropdown-item>
-                    <el-dropdown-item v-if="row.status !== 'paused'" command="pause">暂停执行</el-dropdown-item>
-                    <el-dropdown-item v-else command="resume">恢复执行</el-dropdown-item>
-                    <el-dropdown-item command="delete" divided>删除计划</el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
-            </div>
+            <el-dropdown trigger="click" @command="(cmd: string) => void handlePlanCommand(cmd, row)">
+              <el-button size="small" plain>操作<span class="plan-caret" /></el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="edit">编辑</el-dropdown-item>
+                  <el-dropdown-item v-if="row.status !== 'paused'" command="pause">暂停执行</el-dropdown-item>
+                  <el-dropdown-item v-else command="resume">恢复执行</el-dropdown-item>
+                  <el-dropdown-item command="delete" divided>删除计划</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </template>
         </el-table-column>
       </el-table>
@@ -699,20 +701,20 @@ onMounted(async () => {
           <div class="form-hint">只买这个时间段内发车的车次。</div>
         </el-form-item>
         <el-form-item label="车次">
-          <div style="display: flex; gap: 8px; width: 100%">
+          <div class="train-row">
             <el-select
               v-model="editing.trainNumbers"
               multiple
               filterable
               allow-create
               placeholder="不填=按时间段自动匹配"
-              style="flex: 1"
+              class="train-select"
             >
-              <el-option v-for="t in trainOptions" :key="t.code" :label="t.label" :value="t.code" />
+              <el-option v-for="code in editing.trainNumbers ?? []" :key="code" :label="code" :value="code" />
             </el-select>
-            <el-button :loading="trainLoading" @click="searchTrains">查询车次</el-button>
+            <el-button text type="primary" @click="gotoTrainSearch">查车次 →</el-button>
           </div>
-          <div class="form-hint">点「查询车次」从 12306 拉取真实可购车次（需已登录）；也可直接输入车次号。</div>
+          <div class="form-hint">点「查车次」到车次查询页看实时余票，选中后可一键加入计划；这里也可直接输入车次号（如 G1）。</div>
         </el-form-item>
         <el-form-item label="座位位置">
           <el-select v-model="editing.seatPositions" multiple placeholder="靠窗 / 过道偏好（可多选）">
@@ -990,14 +992,17 @@ onMounted(async () => {
   margin-top: 2px;
 }
 
-/* ---- 操作栏：主操作 + 「更多」下拉，避免一行挤 5 个按钮 ---- */
-.plan-actions {
+.train-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex-wrap: nowrap;
+  gap: 8px;
+  width: 100%;
 }
-/* 纯 CSS 下拉箭头（项目未引入 @element-plus/icons-vue） */
+.train-select {
+  flex: 1;
+}
+
+/* ---- 操作栏：「操作」下拉（详情走名称链接，这里只留编辑/暂停·恢复/删除）---- */
 .plan-caret {
   display: inline-block;
   width: 0;

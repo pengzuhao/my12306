@@ -124,6 +124,8 @@ export interface TrainOption {
   duration: string;
   /** 该车次余票里出现的席别代码列表 */
   seatTypes: string[];
+  /** 各席别余票文本（席别中文名 → 余票数量/「有」「无」） */
+  seats?: Record<string, string>;
 }
 
 export const metaApi = {

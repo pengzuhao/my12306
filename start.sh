@@ -187,6 +187,26 @@ stop_daemon() {
     warn "优雅退出超时，强制结束"
     kill -9 "$pid" 2>/dev/null || true
   fi
+
+  # node 退出后，Playwright 拉起的 Chromium 子进程可能成为孤儿继续驻留，
+  # 它们仍占着 browser-profile 的句柄/锁，下次启动时持久化上下文会失败
+  # （表现为车次查询等依赖浏览器的接口 page.evaluate: Failed to fetch）。
+  # 这里按命令行里的 profile 路径匹配回收，仅限本项目的 profile 目录，避免误杀。
+  local orphan
+  orphan="$(pgrep -f "browser-profile/${SYSTEM_USER_ID:-system}" 2>/dev/null || true)"
+  if [ -n "$orphan" ]; then
+    warn "发现残留浏览器进程（${orphan//$'\n'/ }），正在回收..."
+    # shellcheck disable=SC2086
+    kill $orphan 2>/dev/null || true
+    for i in $(seq 1 10); do
+      # pgrep 没匹配到任何进程时会返回非零，这里不能依赖它的退出码
+      [ -z "$(pgrep -f "browser-profile/${SYSTEM_USER_ID:-system}" 2>/dev/null || true)" ] && break
+      sleep 0.3
+    done
+    # shellcheck disable=SC2086
+    kill -9 $orphan 2>/dev/null || true
+  fi
+
   rm -f "$PID_FILE"
   info "已停止"
 }

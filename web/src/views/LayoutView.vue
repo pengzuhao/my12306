@@ -27,6 +27,7 @@ const ws = ref<WsClient | null>(null);
 const menuItems = [
   { index: '/dashboard', title: '车票日历' },
   { index: '/orders', title: '已购车票' },
+  { index: '/trains', title: '车次查询' },
   { index: '/plans', title: '购票计划' },
   { index: '/feishu', title: '飞书通知' },
   // 「任务与日志」已合并进购票计划详情，旧书签自动跳转过去

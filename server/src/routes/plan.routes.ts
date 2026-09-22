@@ -38,7 +38,7 @@ const planSchema = z.object({
   timeFrom: z.string().nullable().optional(),
   timeTo: z.string().nullable().optional(),
   trainNumbers: z.array(z.string()).nullable().optional(),
-  seatPositions: z.array(z.enum(['A', 'B', 'C', 'D', 'F'])).min(1, '请至少选择一个座位席别'),
+  seatPositions: z.array(z.enum(['A', 'B', 'C', 'D', 'F'])).default([]),
   /** 席别（必选多选）：订票时严格按所选席别匹配，不回退未选席别 */
   seatTypes: z.array(z.enum(['ZE', 'ZY', 'TZ', 'GR', 'RW', 'YW', 'RZ', 'YZ'])).min(1, '请至少选择一个席别'),
   allowNoSeat: z.boolean().default(false),
@@ -265,6 +265,9 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
     const user = currentUser();
     const { from, to, date } = request.query as { from?: string; to?: string; date?: string };
     if (!from || !to || !date) return reply.code(400).send({ error: '请提供出发站、到达站和乘车日期' });
+    // 过去日期 12306 不卖票，查询必然失败——直接挡掉，给可读提示
+    const today = new Date().toISOString().slice(0, 10);
+    if (date < today) return reply.code(400).send({ error: '不能查询过去日期的车次，请选择今天或以后的日期' });
     const acc = RailwayAccountRepo.get(user.id);
     if (!acc || acc.status !== 'active') {
       return reply.code(400).send({ error: '12306 未登录，请先在顶栏扫码登录后查询车次' });
@@ -284,6 +287,8 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
           duration: t.duration,
           /** 余票里出现的席别（透传给前端做选项，不写死） */
           seatTypes: Object.keys(t.seats),
+          /** 各席别余票文本（车次查询页展示用） */
+          seats: t.seats,
         })),
       };
     } catch (e) {
