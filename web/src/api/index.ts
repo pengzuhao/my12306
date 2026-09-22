@@ -74,6 +74,9 @@ export const planApi = {
   previewDates: (data: PlanForm) => http.post('/plans/preview-dates', data).then((r) => r.data),
   dates: (id: string) => http.get(`/plans/${id}/dates`).then((r) => r.data as PlanDateEntry[]),
   stations: (keyword: string) => http.get('/stations', { params: { keyword } }).then((r) => r.data),
+  /** 手动重试失败/已跳过的任务（重置为 queued 立即重跑） */
+  retryTask: (planId: string, taskId: string) =>
+    http.post(`/plans/${planId}/tasks/${taskId}/retry`).then((r) => r.data as TaskSnapshot),
 };
 
 // ---- 会话（扫码登录，不保存密码） ----

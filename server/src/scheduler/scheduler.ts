@@ -10,10 +10,17 @@
  *     → running（机器人执行中，含失败退避重试）
  *     → success / failed / cancelled
  *
- * 三个定时任务：
+ * success 之后的未支付订单由"支付到期闹钟"接管：
+ *   success（未支付，带 payDeadlineTs）
+ *     → 到点（payDeadline + 1 分钟）重查订单
+ *     → 票已失效 → 回滚 plan_date 为 pending、任务重置为 queried 立即重订
+ *     → 票仍在（仍未支付）→ 5 分钟后复检，最多 3 次，之后交给 10 分钟对账兜底
+ *
+ * 三个定时任务 + 一个到期闹钟：
  *   A. 计划扫描（每 5 分钟）：为活跃计划生成未来任务，推算日期入库
  *   B. 起售查询（每 1 分钟）：为 pending 任务提前查询起售时间（预售期内才能查到）
  *   C. 到点触发（每 1 秒）：saleAt <= now 且状态 queried 的任务立即执行
+ *   D. 对账（每 10 分钟）：未支付订单失效后回滚重订，并作为到期闹钟的兜底
  */
 import { PlansRepo, PlanDatesRepo, TasksRepo, PassengersRepo, RailwayAccountRepo } from '../db/repo.js';
 import { computeDates } from '../plans/date-engine.js';
@@ -25,7 +32,7 @@ import { purchaseTicket } from '../bot/order.js';
 import { findBlockingUnpaid } from '../bot/orders.js';
 import { querySaleTime } from '../bot/tickets.js';
 import { queryPurchasedTickets, type PurchasedTicket } from '../bot/reconcile.js';
-import { notifyOrderSuccess, notifyTaskFailed } from '../notify/feishu.js';
+import { notifyOrderSuccess, notifyTaskFailed, notifyDuplicatedOrder } from '../notify/feishu.js';
 import { DEFAULT_PRESALE_DAYS } from '../config.js';
 import type { Passenger, Plan, Task } from '../types.js';
 import type { PurchaseResult } from '../bot/order.js';
@@ -49,6 +56,33 @@ const UNPAID_RETRY_FALLBACK_MS = 15 * 60 * 1000;
 /** 对账节流：同一用户至少间隔 N 分钟才全量查一次订单，避免每秒触发都打接口 */
 const RECONCILE_MIN_INTERVAL_MS = 10 * 60 * 1000;
 const lastReconcileAt = new Map<string, number>();
+
+/**
+ * 支付到期定时器（需求：到点刷新车票状态，失效则自动重订）。
+ *
+ * 任务成功且订单未支付时，按 12306 下发的支付截止时间（payDeadlineTs）
+ * 定一个到点闹钟：到期后立即重查订单，票已失效则回滚 plan_date 并把任务
+ * 重置为 queried，触发器 1 秒内重新下单。比被动等 10 分钟对账快得多
+ * （抢票窗口里 10 分钟可能就没票了）。
+ *
+ * 防自激：到期时间已过去太久（超过 30 分钟）的视为陈旧数据，不设定闹钟，
+ * 交给 10 分钟对账兜底——否则查重命中一个永不消失的影子订单会每 30 秒
+ * 空转一轮（2026-09-20 的 EQ96319535 就是这类脏数据）。
+ */
+const PAY_DEADLINE_BUFFER_MS = 60_000; // 给 12306 留出取消订单的缓冲
+const PAY_DEADLINE_MIN_DELAY_MS = 30_000; // 到期时间已过时，最短 30 秒后查一次
+const PAY_DEADLINE_STALE_MS = 30 * 60_000; // 超过这个时间未支付视为陈旧，不设定闹钟
+const PAY_DEADLINE_RECHECK_MS = 5 * 60_000; // 到期后票仍在，隔 5 分钟再查
+const PAY_DEADLINE_MAX_RECHECKS = 3; // 最多复检 3 次，之后交给 10 分钟对账
+const payDeadlineTimers = new Map<string, NodeJS.Timeout>();
+
+function clearPayDeadlineTimer(taskId: string): void {
+  const t = payDeadlineTimers.get(taskId);
+  if (t) {
+    clearTimeout(t);
+    payDeadlineTimers.delete(taskId);
+  }
+}
 
 /** 任务 → 互斥锁，避免同一任务并发执行 */
 const runningLocks = new Set<string>();
@@ -262,6 +296,8 @@ async function reconcileBeforeSale(): Promise<void> {
         for (const t of tasks) {
           if (t.status === 'success') {
             // 保留 saleAt（起售时刻不变）；重置为 queried 后触发器会重新执行
+            // 同时清掉可能挂着的支付到期闹钟（闹钟里会校验状态，但清掉更省一次空查）
+            clearPayDeadlineTimer(t.id);
             TasksRepo.update(t.id, { status: 'queried', result: null, error: '对账回滚：未支付订单已失效，重新执行', finishedAt: null });
             logger.info('对账回滚：重新等待执行', { taskId: t.id, plan: plan.name, travelDate: d.travelDate, saleAt: t.saleAt });
           }
@@ -280,6 +316,108 @@ function findByDateAndAnyCode(purchased: Map<string, { orderNo: string; status: 
     if (key.slice(0, prefix.length) === prefix) return true;
   }
   return false;
+}
+
+/** 已购集合里该日期的全部车票（支付到期检查用，需知道是否已支付） */
+function entriesForDate(purchased: Map<string, PurchasedTicket>, travelDate: string): PurchasedTicket[] {
+  const prefix = `${travelDate.replace(/\D/g, '').slice(0, 8)}|`;
+  const out: PurchasedTicket[] = [];
+  for (const [key, v] of purchased) {
+    if (key.slice(0, prefix.length) === prefix) out.push(v);
+  }
+  return out;
+}
+
+/**
+ * 支付到期闹钟：到点后重查订单，票已失效则回滚重订（用户需求：到期自动刷新 + 重订）。
+ *
+ * 触发时机 = payDeadlineTs + 60 秒缓冲（12306 取消订单有延迟，立刻查可能还在）。
+ * 到点后票仍在且仍未支付：5 分钟后再查，最多 3 次，之后交给 10 分钟对账兜底。
+ */
+function schedulePayDeadlineCheck(task: Task, plan: Plan, payDeadlineTs: number): void {
+  // 陈旧数据（到期时间已过去太久）不设定闹钟，交给对账兜底，避免空转自激
+  if (payDeadlineTs + PAY_DEADLINE_STALE_MS < Date.now()) {
+    logger.info('支付截止时间已过期较久，交给对账兜底，不设定闹钟', { taskId: task.id, travelDate: task.travelDate });
+    return;
+  }
+  clearPayDeadlineTimer(task.id);
+  const delay = Math.max(payDeadlineTs - Date.now() + PAY_DEADLINE_BUFFER_MS, PAY_DEADLINE_MIN_DELAY_MS);
+  const timer = setTimeout(() => {
+    payDeadlineTimers.delete(task.id);
+    void onPayDeadlineReached(task, plan, 0);
+  }, delay);
+  payDeadlineTimers.set(task.id, timer);
+  logger.info('已设定支付到期定时器', {
+    taskId: task.id,
+    travelDate: task.travelDate,
+    fireAt: new Date(Date.now() + delay).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
+  });
+}
+
+/** 支付到期闹钟触发：重查订单，决定保持 done 还是回滚重订 */
+async function onPayDeadlineReached(task: Task, plan: Plan, recheck: number): Promise<void> {
+  // 任务已不在 success（被对账回滚/取消/重跑过），闹钟作废
+  const cur = TasksRepo.get(task.id);
+  if (!cur || cur.status !== 'success') {
+    logger.info('支付到期检查：任务已离开 success，跳过', { taskId: task.id, status: cur?.status ?? '不存在' });
+    return;
+  }
+  const pd = PlanDatesRepo.list(plan.id).find((d) => d.travelDate === task.travelDate);
+  if (!pd || pd.status !== 'done') {
+    logger.info('支付到期检查：当日计划已不在 done，跳过', { taskId: task.id, travelDate: task.travelDate });
+    return;
+  }
+
+  let purchased: Map<string, PurchasedTicket> | null = null;
+  try {
+    // 到期检查也走用户锁：和正在执行的购票/对账共用同一浏览器上下文，串行避免踩踏
+    purchased = await withUserLock(plan.userId, async () => {
+      const ctx = await getContext(plan.userId);
+      return queryPurchasedTickets(ctx);
+    });
+  } catch (e) {
+    logger.warn('支付到期检查：订单查询异常', { taskId: task.id, error: e });
+  }
+  if (!purchased) {
+    // 查询失败也要重试，别让到点检查静默丢失（登录态失效等情况）
+    if (recheck < PAY_DEADLINE_MAX_RECHECKS) {
+      logger.warn('支付到期检查：查询失败，稍后重试', { taskId: task.id, recheck: recheck + 1 });
+      const t = setTimeout(() => void onPayDeadlineReached(task, plan, recheck + 1), PAY_DEADLINE_RECHECK_MS);
+      payDeadlineTimers.set(task.id, t);
+    } else {
+      logger.error('支付到期检查：连续查询失败，交给对账兜底', { taskId: task.id });
+    }
+    return;
+  }
+
+  const hits = entriesForDate(purchased, task.travelDate);
+  if (hits.length) {
+    // 票还在：用户可能已支付，或 12306 还没来得及取消未支付订单
+    if (hits.every((h) => h.status === 'paid')) {
+      logger.info('支付到期检查：用户已支付，保持完成', { taskId: task.id, travelDate: task.travelDate });
+      return;
+    }
+    // 仍未支付：订单应该马上要被取消，隔几分钟再查
+    if (recheck < PAY_DEADLINE_MAX_RECHECKS) {
+      logger.info('支付到期检查：仍未支付，稍后复检', { taskId: task.id, travelDate: task.travelDate, recheck: recheck + 1 });
+      const t = setTimeout(() => void onPayDeadlineReached(task, plan, recheck + 1), PAY_DEADLINE_RECHECK_MS);
+      payDeadlineTimers.set(task.id, t);
+    } else {
+      logger.warn('支付到期检查：复检上限已到，交给对账兜底', { taskId: task.id, travelDate: task.travelDate });
+    }
+    return;
+  }
+
+  // 票没了：未支付订单已被 12306 取消且未补票 → 回滚重订
+  PlanDatesRepo.markPending(plan.id, task.travelDate);
+  TasksRepo.update(task.id, {
+    status: 'queried',
+    result: null,
+    error: '支付到期：未支付订单已失效，重新执行',
+    finishedAt: null,
+  });
+  wsHub.broadcastToUser(plan.userId, { type: 'task', payload: TasksRepo.get(task.id) });
+  logger.info('支付到期：订单已失效，已回滚并安排立即重订', { taskId: task.id, plan: plan.name, travelDate: task.travelDate, saleAt: cur.saleAt });
 }
 
 /**
@@ -402,8 +540,20 @@ async function runTask(task: Task): Promise<void> {
       // 对账回滚只扫描 status='done' 的记录，漏标会导致"未支付订单超时取消后不自动重买"
       PlanDatesRepo.markDone(plan.id, task.travelDate);
       if (result.duplicated) {
-        // 查重命中（已购同车次）：未实际下单，不触发付款提醒
-        logger.info('已购同车次，标记当日计划完成', { taskId: task.id, train: result.trainCode, orderNo: result.orderNo });
+        // 查重命中（已购同车次）：未实际下单。未支付的同样要提醒用户付款，
+        // 否则用户根本不知道名下还有未支付订单（2026-09-20 的 EQ96319535 就是这么被静默标记成功的）
+        logger.info('已购同车次，标记当日计划完成', { taskId: task.id, train: result.trainCode, orderNo: result.orderNo, paid: result.paid });
+        const notify = await notifyDuplicatedOrder({
+          userId: task.userId,
+          planName: plan.name,
+          trainNumber: result.trainCode,
+          travelDate: task.travelDate,
+          passengers: result.passengers,
+          orderNo: result.orderNo,
+          paid: Boolean(result.paid),
+          payDeadline: result.payDeadline,
+        });
+        if (!notify.ok) logger.warn('查重命中但飞书通知失败', { taskId: task.id, orderNo: result.orderNo, error: notify.error });
       } else {
         // 需求 5：成功不付款，飞书提醒用户付款
         const notify = await notifyOrderSuccess({
@@ -421,6 +571,11 @@ async function runTask(task: Task): Promise<void> {
           // 通知失败必须留痕：用户收不到提醒就不知道要付款，订单会超时取消
           logger.error('购票成功但飞书通知失败', { taskId: task.id, orderNo: result.orderNo, error: notify.error });
         }
+      }
+      // 未支付订单（无论真实下单还是查重命中）：按支付截止时间定到点闹钟，
+      // 到期后自动重查，票已失效就回滚重订（用户需求：支付到期定时器 + 自动重订）
+      if (result.payDeadlineTs) {
+        schedulePayDeadlineCheck(task, plan, result.payDeadlineTs);
       }
     } else {
       // 失败退避重试
@@ -505,6 +660,8 @@ export function stopScheduler(): void {
     if (t) clearInterval(t);
   }
   scanTimer = saleTimer = triggerTimer = reconcileTimer = null;
+  for (const t of payDeadlineTimers.values()) clearTimeout(t);
+  payDeadlineTimers.clear();
   if (calendarReadyUnsub) {
     calendarReadyUnsub();
     calendarReadyUnsub = null;

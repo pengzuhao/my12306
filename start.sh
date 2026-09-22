@@ -37,13 +37,18 @@ pick_node() {
   # 原生模块的 ABI 必须与 Node 主版本匹配，否则启动时会报 ERR_DLOPEN_FAILED。
   # 注意：仅 require() 不足以判定——它不会真正 dlopen 原生模块，必须实际建一个库。
   local probe="const D=require('$ROOT/node_modules/better-sqlite3');const d=new D(':memory:');d.exec('create table t(a)');d.close();"
+  # 候选顺序：当前 PATH 的 node → 常见安装位置 → 托管版本目录。
+  # 注意 ~/.workbuddy/binaries/node/versions/current 在本机是普通文件而非
+  # 符号链接，不能直接拼 /bin/node；改成遍历 versions/*/bin/node。
   local candidates=(
     "$(command -v node 2>/dev/null || true)"
     /opt/homebrew/bin/node
-    "$HOME/.workbuddy/binaries/node/versions/current/bin/node"
     /usr/local/bin/node
   )
   local c
+  for c in "$HOME"/.workbuddy/binaries/node/versions/*/bin/node; do
+    [ -x "$c" ] && candidates+=("$c")
+  done
   for c in "${candidates[@]}"; do
     [ -n "$c" ] && [ -x "$c" ] || continue
     if "$c" -e "$probe" >/dev/null 2>&1; then

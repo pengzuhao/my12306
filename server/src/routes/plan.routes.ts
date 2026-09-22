@@ -10,6 +10,7 @@ import { ensureYears, isWorkday, holidayName, addDays, isYearDegraded } from '..
 import { Logger } from '../logger.js';
 import { nanoid } from 'nanoid';
 import { DEFAULT_PRESALE_DAYS } from '../config.js';
+import { wsHub } from '../ws/hub.js';
 import { SEAT_NAMES } from '../bot/constants.js';
 
 const logger = new Logger('plan');
@@ -201,6 +202,37 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
       logger.warn('计划详情推算失败，返回空列表等调度器刷新', { plan: plan.name, error: msg });
       return [];
     }
+  });
+
+  /**
+   * 手动重试失败/已跳过的任务（用户在管理台点「重试」）。
+   *
+   * 典型场景：购票因"12306 登录失效"失败后任务进入 failed，自动重试次数已用尽，
+   * 用户重新扫码登录后需要一个人工触发入口——重置为 queried 后触发器 1 秒内重新执行。
+   * saleAt 设为当前时间即"立即到期"，等价于马上跑。
+   */
+  app.post('/api/plans/:id/tasks/:taskId/retry', async (request, reply) => {
+    const user = currentUser();
+    const { id, taskId } = request.params as { id: string; taskId: string };
+    const plan = PlansRepo.get(id);
+    if (!plan || plan.userId !== user.id) return reply.code(404).send({ error: '计划不存在' });
+    const task = TasksRepo.get(taskId);
+    if (!task || task.planId !== id) return reply.code(404).send({ error: '任务不存在' });
+    if (task.status === 'running') return reply.code(409).send({ error: '任务正在执行，无法重试' });
+
+    TasksRepo.update(taskId, {
+      status: 'queried',
+      saleAt: new Date().toISOString(),
+      result: null,
+      error: null,
+      attempts: 0,
+      startedAt: null,
+      finishedAt: null,
+    });
+    const updated = TasksRepo.get(taskId);
+    wsHub.broadcastToUser(user.id, { type: 'task', payload: updated });
+    logger.info('手动重试任务', { taskId, plan: plan.name, travelDate: task.travelDate });
+    return updated;
   });
 
   /** 站点搜索（下拉提示） */

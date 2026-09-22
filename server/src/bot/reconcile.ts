@@ -15,6 +15,7 @@
  */
 import type { BrowserContext } from 'playwright';
 import { fetchCompletedOrders, fetchIncompleteOrders, warmOrderPage, type RawOrder, type RawTicket } from './orderApi.js';
+import { parseCnTimestamp } from './orders.js';
 import { Logger } from '../logger.js';
 
 const logger = new Logger('bot');
@@ -24,6 +25,8 @@ export interface PurchasedTicket {
   orderNo: string;
   /** 票状态：未完成订单=未支付/待出票，已完成订单=已支付/已出票 */
   status: 'unpaid' | 'paid';
+  /** 支付截止时间戳（毫秒，北京时间解析）；未完成订单的"待支付"票才有，其余为 null */
+  payLimitTs: number | null;
 }
 
 /** 归一化日期（去分隔符）和车次（去空格大写）后比较 */
@@ -59,7 +62,10 @@ function collectFromOrders(
       if (!d || !c) continue;
       const st = String(t.ticket_status_name ?? '');
       const isUnpaid = fromIncomplete && st.includes('待支付');
-      map.set(`${d}|${c}`, { orderNo, status: isUnpaid ? 'unpaid' : 'paid' });
+      // 支付截止时间：只有"待支付"票才有意义（已完成订单的 pay_limit_time 是 2099 哨兵值）。
+      // 优先取订单层，退到票层；交给调度器的"支付到期定时器"使用。
+      const payLimitTs = isUnpaid ? parseCnTimestamp(o.pay_limit_time ?? t.pay_limit_time) : null;
+      map.set(`${d}|${c}`, { orderNo, status: isUnpaid ? 'unpaid' : 'paid', payLimitTs });
     }
   }
 }

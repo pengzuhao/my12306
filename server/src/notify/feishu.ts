@@ -124,6 +124,42 @@ export function notifyOrderSuccess(params: {
   return sendFeishu(userId, lines.join('\n'), { urgent: true });
 }
 
+/** 查重命中提醒（已购车票中已含目标车次，本次未实际下单） */
+export function notifyDuplicatedOrder(params: {
+  userId: string;
+  planName: string;
+  trainNumber: string;
+  travelDate: string;
+  passengers: string[];
+  orderNo?: string;
+  paid: boolean;
+  payDeadline?: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const { userId, planName, trainNumber, travelDate, passengers, orderNo, paid, payDeadline } = params;
+  if (paid) {
+    // 已支付：纯信息同步，不扰民
+    const lines = [
+      '✅ 已购车票（已支付），本次跳过下单',
+      `计划：${planName}`,
+      `车次：${trainNumber}  乘车日期：${travelDate}`,
+      `乘车人：${passengers.join('、')}`,
+      orderNo ? `订单号：${orderNo}` : '',
+    ].filter(Boolean);
+    return sendFeishu(userId, lines.join('\n'));
+  }
+  // 未支付：和真实下单一样需要用户去付款，走加急
+  const lines = [
+    'ℹ️ 已购同车次（未支付），本次跳过下单',
+    `计划：${planName}`,
+    `车次：${trainNumber}  乘车日期：${travelDate}`,
+    `乘车人：${passengers.join('、')}`,
+    orderNo ? `订单号：${orderNo}` : '',
+    payDeadline ? `请尽快登录 12306 完成支付，订单保留至 ${payDeadline}` : '请尽快登录 12306 完成支付',
+    '—— 若订单到期失效，系统会自动重新购票',
+  ].filter(Boolean);
+  return sendFeishu(userId, lines.join('\n'), { urgent: true });
+}
+
 /** 会话失活告警（需求 3：发现失活通知用户） */
 export function notifySessionInvalid(userId: string, reason: string): Promise<{ ok: boolean; error?: string }> {
   return sendFeishu(

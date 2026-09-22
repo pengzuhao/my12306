@@ -21,6 +21,7 @@ import { URLS, SEAT_NAMES } from './constants.js';
 import { Logger } from '../logger.js';
 import { queryTrains, seatCount } from './tickets.js';
 import { queryPurchasedTickets } from './reconcile.js';
+import { parseCnTimestamp } from './orders.js';
 import type { Passenger, TrainInfo } from '../types.js';
 
 const logger = new Logger('bot');
@@ -54,10 +55,14 @@ export interface PurchaseResult {
   passengers: string[];
   seatInfo?: string;
   payDeadline?: string;
+  /** 支付截止时间戳（毫秒，北京时间解析）；调度器据此设定"支付到期定时器" */
+  payDeadlineTs?: number;
   orderNo?: string;
   error?: string;
   /** 查重命中：已购车票中已含目标车次，未实际下单，当日计划应标记完成 */
   duplicated?: boolean;
+  /** 查重命中时，命中订单是否已支付（真实下单恒为未支付：本系统不付款） */
+  paid?: boolean;
 }
 
 function inTimeRange(depart: string, from?: string | null, to?: string | null): boolean {
@@ -148,7 +153,7 @@ function pickSeat(train: TrainInfo, params: PurchaseParams): { code: string; nam
  */
 interface OrderCheck {
   /** 查重命中：已购同车次 */
-  duplicated?: { orderNo: string; paid: boolean };
+  duplicated?: { orderNo: string; paid: boolean; payLimitTs: number | null };
   /** 拦截型冲突：账户存在其他未支付订单，新车票买不了 */
   blockingUnpaid?: { orderNo: string; date: string; trainCode: string };
 }
@@ -164,7 +169,7 @@ async function checkOrders(
   const day = trainDate.replace(/\D/g, '').slice(0, 8);
   const code = trainCode.replace(/\s/g, '').toUpperCase();
   const hit = [...purchased.entries()].find(([k]) => k.slice(0, 8) === day && k.split('|')[1] === code);
-  if (hit) return { duplicated: { orderNo: hit[1].orderNo, paid: hit[1].status === 'paid' } };
+  if (hit) return { duplicated: { orderNo: hit[1].orderNo, paid: hit[1].status === 'paid', payLimitTs: hit[1].payLimitTs } };
   // 12306 只允许一个未支付订单：其他日期的未支付订单会拦死新订单
   for (const [k, v] of purchased) {
     if (v.status !== 'unpaid') continue;
@@ -365,14 +370,18 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
     const orderCheck = await checkOrders(context, params.trainDate, train.trainCode);
     if (orderCheck?.duplicated) {
       const dup = orderCheck.duplicated;
-      logger.info('已存在同车次已购车票，跳过下单', { train: train.trainCode, orderNo: dup.orderNo, paid: dup.paid });
+      logger.info('已存在同车次已购车票，跳过下单', { train: train.trainCode, orderNo: dup.orderNo, paid: dup.paid, payLimitTs: dup.payLimitTs });
       return {
         ok: true,
         duplicated: true,
+        paid: dup.paid,
         trainCode: train.trainCode,
         passengers: names,
         orderNo: dup.orderNo,
         seatInfo: dup.paid ? '已购（已支付）' : '已购（未支付）',
+        // 查重命中未支付订单时，支付截止时间同样要带回，调度器据此设支付到期定时器
+        payDeadlineTs: dup.payLimitTs ?? undefined,
+        payDeadline: dup.payLimitTs ? new Date(dup.payLimitTs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : undefined,
       };
     }
     if (orderCheck?.blockingUnpaid) {
@@ -671,8 +680,9 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
 
     // 支付截止时间以 12306 下发为准（未支付订单通常保留 30/45 分钟，但以实际为准），
     // 拿不到时不编造——前端会显示"请尽快支付"而不给错误时限。
-    const payDeadline = payLimitRaw
-      ? new Date(payLimitRaw.replace(/-/g, '/')).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+    const payDeadlineTs = parseCnTimestamp(payLimitRaw) ?? undefined;
+    const payDeadline = payDeadlineTs
+      ? new Date(payDeadlineTs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
       : undefined;
 
     // 汇总席别信息（用于通知）：优先用确认页读到的【实际下单席别】，
@@ -690,6 +700,7 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
       orderNo,
       // 12306 下发的实际支付截止时间（北京时间），拿不到时为 undefined——绝不编造
       payDeadline,
+      payDeadlineTs,
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

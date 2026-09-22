@@ -7,11 +7,13 @@ import {
   passengerApi,
   calendarApi,
   metaApi,
+  sessionApi,
   type PlanForm,
   type HolidayDay,
   type PlanDateEntry,
   type TaskSnapshot,
   type SeatTypeOption,
+  type TrainOption,
 } from '../api';
 
 const router = useRouter();
@@ -241,32 +243,97 @@ async function searchStations(keyword: string, cb: (items: Array<{ value: string
 }
 
 /**
- * 跳转到独立的车次查询页。
+ * 弹窗内联车次查询（用户要求：不要跳到独立页面，在创建计划时直接选车次）。
  *
- * 车次查询依赖 12306 实时余票（需要登录态、受预售期限制），
- * 放在独立页面里查更清晰，也避免在计划弹窗里套一层浏览器交互。
- * 查到后可在车次页直接「加入计划」跳回来，并把站点/日期/车次带过来。
+ * 取当前表单的站点 + 乘车日期直接查 12306 实时余票，结果展示在同一个弹窗里，
+ * 点「选用」即写入车次表单，不打断填表流程。
  */
-function gotoTrainSearch(): void {
-  const date = editing.dateMode === 'single' ? editing.travelDate : editing.validFrom;
-  router.push({
-    path: '/trains',
-    query: {
-      from: editing.fromStation || undefined,
-      to: editing.toStation || undefined,
-      date: date || undefined,
-    },
-  });
+const trainSearchVisible = ref(false);
+const trainLoading = ref(false);
+const trainResults = ref<TrainOption[]>([]);
+/** 12306 是否已登录（车次查询需要登录态） */
+const loggedIn = ref(false);
+
+/** 当前表单用于查票的日期：单次模式用乘车日期，周期模式用生效起始日 */
+const searchDate = computed(() => (editing.dateMode === 'single' ? editing.travelDate : editing.validFrom));
+
+async function checkLogin(): Promise<void> {
+  try {
+    const state = (await sessionApi.state()) as { loggedIn?: boolean };
+    loggedIn.value = !!state.loggedIn;
+  } catch {
+    loggedIn.value = false;
+  }
+}
+
+/** 余票文本 → 颜色：有票绿、无票灰 */
+function seatColor(text: string | undefined): string {
+  if (!text || text === '无' || text === '') return '#c0c4cc';
+  if (text === '有' || text === '*') return '#67c23a';
+  const n = Number(text);
+  return Number.isFinite(n) && n > 0 ? '#67c23a' : '#c0c4cc';
+}
+
+/** 展开/收起弹窗内的车次查询面板；展开时自动带当前条件查一次 */
+async function toggleTrainSearch(): Promise<void> {
+  trainSearchVisible.value = !trainSearchVisible.value;
+  if (trainSearchVisible.value) {
+    await checkLogin();
+    void searchTrains();
+  }
+}
+
+async function searchTrains(): Promise<void> {
+  if (!editing.fromStation || !editing.toStation) {
+    ElMessage.warning('请先填写出发站和到达站');
+    return;
+  }
+  if (!searchDate.value) {
+    ElMessage.warning(editing.dateMode === 'single' ? '请先选择乘车日期' : '请先填写开始日期');
+    return;
+  }
+  if (!loggedIn.value) {
+    ElMessage.warning('请先在顶栏扫码登录 12306 后再查询车次');
+    return;
+  }
+  trainLoading.value = true;
+  try {
+    const res = await metaApi.trains(editing.fromStation, editing.toStation, searchDate.value);
+    trainResults.value = res.trains;
+    if (!res.trains.length) {
+      ElMessage.warning('该日期/区间暂无可查车次（可能未到预售期或无直达车）');
+    }
+  } catch (e) {
+    trainResults.value = [];
+    ElMessage.error((e as { response?: { data?: { error?: string } } }).response?.data?.error ?? '车次查询失败');
+  } finally {
+    trainLoading.value = false;
+  }
+}
+
+/** 选用某车次：去重后写入车次表单（不关闭面板，可继续选其他车次） */
+function pickTrain(t: TrainOption): void {
+  const list = editing.trainNumbers ?? [];
+  if (!list.includes(t.trainCode)) {
+    editing.trainNumbers = [...list, t.trainCode];
+  }
+  ElMessage.success(`已选用 ${t.trainCode}（${t.departTime} 发车）`);
 }
 
 function openNew(): void {
   Object.assign(editing, emptyForm());
   editing.passengerIds = passengers.value.length ? [passengers.value[0].id] : [];
+  trainResults.value = [];
+  trainSearchVisible.value = false;
+  void checkLogin();
   dialogVisible.value = true;
 }
 
 function openEdit(p: Plan): void {
   Object.assign(editing, JSON.parse(JSON.stringify(p)));
+  trainResults.value = [];
+  trainSearchVisible.value = false;
+  void checkLogin();
   dialogVisible.value = true;
 }
 
@@ -415,6 +482,22 @@ async function loadDetail(id: string): Promise<void> {
     detailRows.value = [];
   } finally {
     detailLoading.value = false;
+  }
+}
+
+/** 手动重试失败/已跳过的任务（如登录失效导致 failed 后，重新扫码登录再来一次） */
+const retryingTaskId = ref<string | null>(null);
+async function retryTask(row: PlanDateEntry): Promise<void> {
+  if (!row.task || !detailPlan.value) return;
+  retryingTaskId.value = row.task.id;
+  try {
+    await planApi.retryTask(detailPlan.value.id, row.task.id);
+    ElMessage.success('已安排重新购票，触发器马上执行');
+    await loadDetail(detailPlan.value.id);
+  } catch (e) {
+    ElMessage.error((e as { response?: { data?: { error?: string } } }).response?.data?.error ?? '重试失败');
+  } finally {
+    retryingTaskId.value = null;
   }
 }
 
@@ -598,7 +681,18 @@ onMounted(async () => {
               <div v-if="row.task?.result" class="mono" style="color: #67c23a">
                 {{ row.task.result.trainCode }} · {{ row.task.result.seatInfo }} · 订单 {{ row.task.result.orderNo ?? '-' }}
               </div>
-              <div v-else-if="row.task?.error" class="mono" style="color: #f56c6c; font-size: 12px">{{ row.task.error }}</div>
+              <div v-else-if="row.task?.error">
+                <div class="mono" style="color: #f56c6c; font-size: 12px">{{ row.task.error }}</div>
+                <el-button
+                  v-if="row.task.status === 'failed' || row.task.status === 'skipped'"
+                  size="small"
+                  link
+                  type="primary"
+                  :loading="retryingTaskId === row.task.id"
+                  style="margin-top: 2px"
+                  @click="void retryTask(row)"
+                >重试</el-button>
+              </div>
               <div v-else-if="row.postponed" style="color: #e6a23c; font-size: 12px">节假日顺延（原始 {{ row.originalDate }}）</div>
               <div v-else style="color: #c0c4cc; font-size: 12px">—</div>
             </template>
@@ -712,9 +806,63 @@ onMounted(async () => {
             >
               <el-option v-for="code in editing.trainNumbers ?? []" :key="code" :label="code" :value="code" />
             </el-select>
-            <el-button text type="primary" @click="gotoTrainSearch">查车次 →</el-button>
+            <el-button text type="primary" @click="void toggleTrainSearch">
+              {{ trainSearchVisible ? '收起余票 ▴' : '查车次余票 ▾' }}
+            </el-button>
           </div>
-          <div class="form-hint">点「查车次」到车次查询页看实时余票，选中后可一键加入计划；这里也可直接输入车次号（如 G1）。</div>
+          <div class="form-hint">点「查车次余票」直接在这里查 12306 实时余票，选中即填入车次；也可跳过直接输入车次号（如 G1）。</div>
+
+          <!-- 内联车次查询面板：站点/日期取当前表单，结果就地选用，不跳页面 -->
+          <div v-if="trainSearchVisible" class="train-panel">
+            <div class="train-panel-bar">
+              <span class="train-panel-cond">
+                查询 <b>{{ editing.fromStation || '出发站' }} → {{ editing.toStation || '到达站' }}</b>
+                <span class="train-panel-date">{{ searchDate ?? '未选日期' }}（{{ editing.dateMode === 'single' ? '乘车日期' : '起始日期' }}）</span>
+              </span>
+              <el-button size="small" type="primary" :loading="trainLoading" @click="void searchTrains">刷新余票</el-button>
+            </div>
+            <el-alert
+              v-if="!loggedIn"
+              class="train-panel-login"
+              type="warning"
+              :closable="false"
+              title="12306 未登录，车次查询需要先登录。请在右上角「扫码登录」后重试。"
+            />
+            <el-table
+              v-if="trainResults.length"
+              :data="trainResults"
+              border
+              size="small"
+              v-loading="trainLoading"
+              max-height="260"
+              :default-sort="{ prop: 'departTime', order: 'ascending' }"
+            >
+              <el-table-column label="车次" prop="trainCode" width="86" fixed />
+              <el-table-column label="发车 → 到达" width="150" sortable prop="departTime">
+                <template #default="{ row }">
+                  <span class="mono">{{ row.departTime }} → {{ row.arriveTime }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="历时" prop="duration" width="76" />
+              <el-table-column label="余票（席别）" min-width="200">
+                <template #default="{ row }">
+                  <div class="seat-list">
+                    <span v-for="(count, name) in (row.seats ?? {})" :key="name" class="seat-chip" :style="{ color: seatColor(count) }">
+                      {{ name }} {{ count }}
+                    </span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="78" fixed="right">
+                <template #default="{ row }">
+                  <el-button size="small" type="primary" plain @click="pickTrain(row)">选用</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div v-else-if="!trainLoading" class="train-panel-empty">
+              {{ loggedIn ? '点「刷新余票」查询车次' : '登录后可查询车次余票' }}
+            </div>
+          </div>
         </el-form-item>
         <el-form-item label="座位位置">
           <el-select v-model="editing.seatPositions" multiple placeholder="靠窗 / 过道偏好（可多选）">
@@ -1000,6 +1148,48 @@ onMounted(async () => {
 }
 .train-select {
   flex: 1;
+}
+
+/* ---- 弹窗内联车次查询面板 ---- */
+.train-panel {
+  margin-top: 8px;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  background: #fafafa;
+  padding: 10px 12px;
+}
+.train-panel-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.train-panel-cond {
+  font-size: 12px;
+  color: #606266;
+}
+.train-panel-date {
+  margin-left: 8px;
+  color: #909399;
+}
+.train-panel-login {
+  margin-bottom: 8px;
+}
+.train-panel-empty {
+  text-align: center;
+  color: #909399;
+  font-size: 12px;
+  padding: 14px 0;
+}
+.seat-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+.seat-chip {
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 /* ---- 操作栏：「操作」下拉（详情走名称链接，这里只留编辑/暂停·恢复/删除）---- */
