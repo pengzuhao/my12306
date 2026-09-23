@@ -200,7 +200,7 @@ onBeforeUnmount(() => {
         <article v-for="(ticket, index) in filteredOrders" :key="ticket.orderNo + index" class="mobile-ticket">
           <div class="ticket-top"><strong>{{ ticket.trainCode }}</strong><el-tag size="small" :type="STATUS_META[ticket.status].type">{{ ticket.statusText || STATUS_META[ticket.status].label }}</el-tag></div>
           <h3>{{ ticket.fromStation }} <span>→</span> {{ ticket.toStation }}</h3>
-          <p>{{ ticket.travelDateTime }}</p><p>{{ ticket.passengers.join('、') }} · {{ ticket.seats.join('、') || '座位待确认' }}</p>
+          <p>出发 {{ ticket.travelDateTime }}</p><p>到达 {{ ticket.arrivalDateTime || '待确认' }}</p><p>{{ ticket.passengers.join('、') }} · {{ ticket.seats.join('、') || '座位待确认' }}</p>
           <p v-if="ticket.status === 'unpaid'" class="unpaid-note">支付截止：{{ ticket.payLimitTime || '请查看 12306' }}</p>
           <div class="ticket-bottom"><span>{{ ticket.totalPrice != null ? '¥' + ticket.totalPrice.toFixed(2) + (ticket.passengers.length > 1 ? '（' + ticket.passengers.length + ' 人合计）' : '') : '' }}</span><el-button type="primary" plain size="small" @click="shareContent = { kind: 'ticket', ticket }">分享到微信</el-button></div>
         </article>
@@ -218,9 +218,10 @@ onBeforeUnmount(() => {
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="乘车日期" width="150">
+        <el-table-column label="出发 / 到达" width="190">
           <template #default="{ row }">
-            <span class="mono">{{ row.travelDateTime }}</span>
+            <div class="mono">出发 {{ row.travelDateTime }}</div>
+            <div class="mono">到达 {{ row.arrivalDateTime || '待确认' }}</div>
           </template>
         </el-table-column>
         <el-table-column label="车次" width="90">

@@ -33,6 +33,8 @@ export interface OrderRow {
   statusText: string;
   /** 乘车日期+上车时间（北京时间，格式 YYYY-MM-DD HH:mm） */
   travelDateTime: string;
+  /** 到达日期时间；接口缺失时不推算 */
+  arrivalDateTime?: string | null;
   trainCode: string;
   fromStation: string;
   toStation: string;
@@ -61,6 +63,16 @@ function normDateTime(s: string | null | undefined): string {
   return h ? `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')} ${hh}:${(mi ?? '00').padStart(2, '0')}` : `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
 }
 
+/** 只接受包含日期的到达时间，不能凭时刻猜测跨日。 */
+function arrivalDateTime(ticket: RawTicket): string | null {
+  const value = normDateTime(ticket.stationTrainDTO?.arrive_time);
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(value)) return null;
+  const instant = new Date(value.replace(' ', 'T') + ':00+08:00');
+  if (!Number.isFinite(instant.getTime())) return null;
+  const normalized = new Date(instant.getTime() + 8 * 3600000).toISOString().slice(0,16).replace('T',' ');
+  return normalized === value ? value : null;
+}
+
 /**
  * 把北京时间的「YYYY-MM-DD HH:mm」解析为毫秒时间戳。
  * 12306 下发的是无时区本地时间，统一按东八区(+08:00)解析。
@@ -80,6 +92,8 @@ interface AccumOrder {
   fromIncomplete: boolean;
   statusText: string;
   travelDateTime: string;
+  /** 到达日期时间；接口缺失时不推算 */
+  arrivalDateTime?: string | null;
   trainCode: string;
   fromStation: string;
   toStation: string;
@@ -125,6 +139,7 @@ function ingestOrders(
         fromIncomplete,
         statusText,
         travelDateTime: normDateTime(t0.start_train_date_page ?? t0.train_date),
+        arrivalDateTime: arrivalDateTime(t0),
         trainCode: String(t0.stationTrainDTO?.station_train_code ?? '').trim(),
         fromStation: String(t0.stationTrainDTO?.from_station_name ?? '').trim(),
         toStation: String(t0.stationTrainDTO?.to_station_name ?? '').trim(),
@@ -177,6 +192,7 @@ function toRow(a: AccumOrder): OrderRow {
     status,
     statusText,
     travelDateTime: a.travelDateTime,
+    arrivalDateTime: a.arrivalDateTime ?? null,
     trainCode: a.trainCode,
     fromStation: a.fromStation,
     toStation: a.toStation,

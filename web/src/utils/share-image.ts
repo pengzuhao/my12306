@@ -14,7 +14,7 @@ export async function renderShareImage(content: ShareContent, personal: boolean)
   const days = content.kind === 'calendar' ? new Date(content.year, content.month, 0).getDate() : 0;
   const gridRows = Math.ceil((offset + days) / 7);
   const gridHeight = content.kind === 'calendar' ? gridRows * 142 + 110 : 0;
-  const heights = cards.map(c => 115 + c.route.length * 40 + c.personal.length * 30);
+  const heights = cards.map(c => 195 + c.route.length * 40 + c.personal.length * 30);
   canvas.height = 290 + gridHeight + heights.reduce((a,b) => a+b+20, 0) + (cards.length ? 0 : 90) + 130;
   if (canvas.height > 30000) throw new Error('当前月车票过多，请按乘车人筛选后分享');
   ctx.fillStyle = '#edf3fa'; ctx.fillRect(0,0,canvas.width,canvas.height);
@@ -43,9 +43,11 @@ export async function renderShareImage(content: ShareContent, personal: boolean)
   cards.forEach((c,i) => {
     const t=c.ticket,h=heights[i]; box(64,y,952,h);
     text(t.trainCode,92,y+44,31,'#245f9a',600);
-    text(`${t.travelDateTime}  ·  ${status(t)}`,315,y+42,23,'#7a8ba1');
+    text(status(t),315,y+42,23,'#7a8ba1');
     c.route.forEach((line,j) => text(line,92,y+91+j*40,30,'#284563',600));
-    c.personal.forEach((line,j) => text(line,92,y+101+c.route.length*40+j*30,22,'#78899d'));
+    text(`出发  ${t.travelDateTime}`,92,y+101+c.route.length*40,24,'#284563');
+    text(`到达  ${t.arrivalDateTime || '待确认'}`,92,y+141+c.route.length*40,26,'#245f9a',600);
+    c.personal.forEach((line,j) => text(line,92,y+181+c.route.length*40+j*30,22,'#78899d'));
     y += h+20;
   });
   if (!cards.length) { text('这个月暂无已支付车票',64,y+35,27,'#7a8ba1'); y+=90; }

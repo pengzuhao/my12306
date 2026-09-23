@@ -174,6 +174,7 @@ export interface OrderRow {
   statusText: string;
   /** 乘车日期+上车时间（北京时间 YYYY-MM-DD HH:mm） */
   travelDateTime: string;
+  arrivalDateTime?: string | null;
   trainCode: string;
   fromStation: string;
   toStation: string;

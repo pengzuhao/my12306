@@ -50,6 +50,8 @@ export interface RawTicket {
   /** 支付截止时间；已完成订单此字段是 2099 哨兵值，不是真实截止时间 */
   pay_limit_time?: string;
   stationTrainDTO?: {
+    /** 到达日期时间（北京时间），如 2026-09-25 18:32 */
+    arrive_time?: string;
     station_train_code?: string;
     from_station_name?: string;
     to_station_name?: string;

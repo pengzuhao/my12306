@@ -39,3 +39,13 @@ test('changed-destination history is separate from the current G1716 ticket', ()
  assert.ok(rows.every(r=>r.passengers.length===1 && r.seats.length===1));
  assert.deepEqual(rows.find(r=>r.statusText==='变更到站票')?.seats,['二等座 07车17A号']);
 });
+
+test('arrival uses the official destination date, including overnight and multi-day trips', () => {
+ for (const arrival of ['2026-09-24 18:32:00','2026-09-25 06:15:00','2026-09-26 08:00:00']) {
+  const rows=normalizeOrders([{sequence_no:'ARRIVAL',tickets:[ticket({stationTrainDTO:{station_train_code:'G1716',arrive_time:arrival}})]}],[]);
+  assert.equal(rows[0].arrivalDateTime,arrival.slice(0,16));
+ }
+ for (const arrival of [undefined,'','06:15','invalid','2026-02-30 06:15','2026-09-25 25:00']) {
+  assert.equal(normalizeOrders([{sequence_no:'UNKNOWN',tickets:[ticket({stationTrainDTO:{arrive_time:arrival}})]}],[])[0].arrivalDateTime,null);
+ }
+});

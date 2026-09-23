@@ -430,7 +430,8 @@ function onVisible(): void {
           </el-tag>
         </div>
         <div class="tk-route">{{ ticketDetail.fromStation }} → {{ ticketDetail.toStation }}</div>
-        <div class="tk-row"><span>乘车日期</span><span class="mono">{{ ticketDetail.travelDateTime }}</span></div>
+        <div class="tk-row"><span>出发时间</span><span class="mono">{{ ticketDetail.travelDateTime }}</span></div>
+        <div class="tk-row"><span>到达时间</span><span class="mono">{{ ticketDetail.arrivalDateTime || '待确认' }}</span></div>
         <div class="tk-row"><span>乘车人</span><span>{{ (ticketDetail.passengers ?? []).join('、') }}</span></div>
         <div class="tk-row"><span>座位</span><span>{{ (ticketDetail.seats ?? []).join('、') || '—' }}</span></div>
         <div class="tk-row"><span>订单号</span><span class="mono">{{ ticketDetail.orderNo }}</span></div>
