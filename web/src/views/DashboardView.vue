@@ -383,7 +383,7 @@ function onVisible(): void {
                 <CalendarDayHeader :date="cell.date" :holiday="cell.hol" :today="cell.isToday" />
                 <div
                   v-for="t in cell.tickets.slice(0, 1)"
-                  :key="t.orderNo"
+                  :key="[t.orderNo, t.travelDateTime, t.trainCode, t.fromStation, t.toStation, t.status].join('|')"
                   class="cal-ticket cal-ticket-clickable"
                   role="button"
                   tabindex="0"
@@ -434,7 +434,7 @@ function onVisible(): void {
         <div class="tk-row"><span>乘车人</span><span>{{ (ticketDetail.passengers ?? []).join('、') }}</span></div>
         <div class="tk-row"><span>座位</span><span>{{ (ticketDetail.seats ?? []).join('、') || '—' }}</span></div>
         <div class="tk-row"><span>订单号</span><span class="mono">{{ ticketDetail.orderNo }}</span></div>
-        <div class="tk-row"><span>票价</span><span>{{ ticketDetail.totalPrice != null ? '¥' + ticketDetail.totalPrice : '—' }}</span></div>
+        <div class="tk-row"><span>票价</span><span>{{ ticketDetail.totalPrice != null ? '¥' + ticketDetail.totalPrice.toFixed(2) + (ticketDetail.passengers.length > 1 ? '（' + ticketDetail.passengers.length + ' 人合计）' : '') : '—' }}</span></div>
         <div v-if="ticketDetail.payLimitTime" class="tk-row tk-warn">
           <span>支付截止</span><span class="mono">{{ ticketDetail.payLimitTime }}</span>
         </div>

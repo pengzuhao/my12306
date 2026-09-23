@@ -202,7 +202,7 @@ onBeforeUnmount(() => {
           <h3>{{ ticket.fromStation }} <span>→</span> {{ ticket.toStation }}</h3>
           <p>{{ ticket.travelDateTime }}</p><p>{{ ticket.passengers.join('、') }} · {{ ticket.seats.join('、') || '座位待确认' }}</p>
           <p v-if="ticket.status === 'unpaid'" class="unpaid-note">支付截止：{{ ticket.payLimitTime || '请查看 12306' }}</p>
-          <div class="ticket-bottom"><span>{{ ticket.totalPrice != null ? '¥' + ticket.totalPrice.toFixed(2) : '' }}</span><el-button type="primary" plain size="small" @click="shareContent = { kind: 'ticket', ticket }">分享到微信</el-button></div>
+          <div class="ticket-bottom"><span>{{ ticket.totalPrice != null ? '¥' + ticket.totalPrice.toFixed(2) + (ticket.passengers.length > 1 ? '（' + ticket.passengers.length + ' 人合计）' : '') : '' }}</span><el-button type="primary" plain size="small" @click="shareContent = { kind: 'ticket', ticket }">分享到微信</el-button></div>
         </article>
       </div>
       <el-table class="desktop-tickets" :data="filteredOrders" border v-loading="loading" empty-text="暂无已购车票">
@@ -235,9 +235,9 @@ onBeforeUnmount(() => {
         <el-table-column label="席别" min-width="140">
           <template #default="{ row }">{{ (row.seats ?? []).join('、') || '-' }}</template>
         </el-table-column>
-        <el-table-column label="票价" width="100">
+        <el-table-column label="票价" width="150">
           <template #default="{ row }">
-            <span v-if="row.totalPrice != null">¥{{ row.totalPrice.toFixed(2) }}</span>
+            <span v-if="row.totalPrice != null">¥{{ row.totalPrice.toFixed(2) }}<small v-if="row.passengers.length > 1">（{{ row.passengers.length }} 人合计）</small></span>
             <span v-else>-</span>
           </template>
         </el-table-column>

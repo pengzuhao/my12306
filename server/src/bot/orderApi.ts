@@ -182,15 +182,15 @@ export async function fetchCompletedOrders(page: Page, days = 90, strict = false
 export function ticketYuan(t: RawTicket): number | null {
   if (t.str_ticket_price_page) {
     const v = Number(t.str_ticket_price_page);
-    if (!Number.isNaN(v)) return v;
+    if (Number.isFinite(v) && v >= 0) return v;
   }
   if (t.ticket_price != null && t.ticket_price !== '') {
     const v = Number(t.ticket_price);
-    if (!Number.isNaN(v)) return v / 100;
+    if (Number.isFinite(v) && v >= 0) return v / 100;
   }
   if (t.price != null && t.price !== '') {
     const v = Number(t.price);
-    if (!Number.isNaN(v)) return v;
+    if (Number.isFinite(v) && v >= 0) return v;
   }
   return null;
 }

@@ -24,7 +24,7 @@ import { Logger } from '../logger.js';
 
 const logger = new Logger('bot');
 
-/** 一条订单（可能含多名乘车人，聚合成一行） */
+/** 同一订单的一个行程及票面状态（同程多人合并为一行） */
 export interface OrderRow {
   orderNo: string;
   /** unpaid=待支付；paid=已支付/已出票/已出站；refunded=已退票 */
@@ -90,7 +90,7 @@ interface AccumOrder {
   payLimitTs: number | null;
 }
 
-/** 把 12306 原始订单列表汇入 map（key = orderNo） */
+/** 同一订单按乘车日期、车次、区间和票面状态分组，避免串票价。 */
 function ingestOrders(
   orders: RawOrder[],
   map: Map<string, AccumOrder>,
@@ -99,42 +99,47 @@ function ingestOrders(
   for (const o of orders) {
     const orderNo = String(o.sequence_no ?? '').trim();
     if (!orderNo) continue;
-    const tickets = o.tickets ?? [];
-    if (!tickets.length) continue;
-    // 已完成订单先入表；未完成订单后入并覆盖——它是「未支付」状态的唯一真实来源
-    const existing = map.get(orderNo);
-    if (existing && !fromIncomplete) continue;
-
-    const t0 = tickets[0];
-    const statusText = String(o.ticket_status_name ?? t0.ticket_status_name ?? (fromIncomplete ? '未完成' : '已完成'));
-    const anyUnpaid = fromIncomplete && tickets.some((t) => String(t.ticket_status_name ?? '').includes('待支付'));
-    const payLimitTime = normPayLimit(o.pay_limit_time) ?? normPayLimit(tickets.find((t) => t.pay_limit_time)?.pay_limit_time);
-
-    let total: number | null = null;
-    for (const t of tickets) {
-      const p = ticketYuan(t);
-      if (p != null) total = (total ?? 0) + p;
+    if (fromIncomplete) {
+      for (const [key, row] of map) if (row.orderNo === orderNo) map.delete(key);
     }
+    const groups = new Map<string, RawTicket[]>();
+    for (const ticket of o.tickets ?? []) {
+      const key = JSON.stringify([orderNo, normDateTime(ticket.start_train_date_page ?? ticket.train_date),
+        ticket.stationTrainDTO?.station_train_code ?? '', ticket.stationTrainDTO?.from_station_name ?? '',
+        ticket.stationTrainDTO?.to_station_name ?? '', cleanStatusText(String(ticket.ticket_status_name ?? o.ticket_status_name ?? ''))]);
+      const group = groups.get(key) ?? [];
+      group.push(ticket); groups.set(key, group);
+    }
+    for (const [key, tickets] of groups) {
+      if (map.has(key) && !fromIncomplete) continue;
+      const t0 = tickets[0];
+      const statusText = String(t0.ticket_status_name ?? o.ticket_status_name ?? (fromIncomplete ? '未完成' : '已完成'));
+      const payLimitTime = normPayLimit(o.pay_limit_time) ?? normPayLimit(tickets.find((t) => t.pay_limit_time)?.pay_limit_time);
 
-    map.set(orderNo, {
-      orderNo,
-      fromIncomplete,
-      statusText,
-      travelDateTime: normDateTime(t0.start_train_date_page ?? t0.train_date),
-      trainCode: String(t0.stationTrainDTO?.station_train_code ?? '').trim(),
-      fromStation: String(t0.stationTrainDTO?.from_station_name ?? '').trim(),
-      toStation: String(t0.stationTrainDTO?.to_station_name ?? '').trim(),
-      passengers: tickets.map((t) => String(t.passenger_name ?? t.passengerDTO?.passenger_name ?? '').trim()).filter(Boolean),
-      seats: tickets
-        .map((t) => {
-          const bits = [t.coach_name, t.seat_name].filter(Boolean).join('车');
-          return [t.seat_type_name, bits].filter(Boolean).join(' ');
-        })
-        .filter(Boolean),
-      totalPrice: total,
-      payLimitTime,
-      payLimitTs: parseCnTimestamp(payLimitTime),
-    });
+      const prices = tickets.map(ticketYuan);
+      const total = prices.every((price): price is number => price != null)
+        ? prices.reduce((sum, price) => sum + Math.round(price * 100), 0) / 100 : null;
+
+      map.set(key, {
+        orderNo,
+        fromIncomplete,
+        statusText,
+        travelDateTime: normDateTime(t0.start_train_date_page ?? t0.train_date),
+        trainCode: String(t0.stationTrainDTO?.station_train_code ?? '').trim(),
+        fromStation: String(t0.stationTrainDTO?.from_station_name ?? '').trim(),
+        toStation: String(t0.stationTrainDTO?.to_station_name ?? '').trim(),
+        passengers: tickets.map((t) => String(t.passenger_name ?? t.passengerDTO?.passenger_name ?? '').trim()).filter(Boolean),
+        seats: tickets
+          .map((t) => {
+            const bits = [t.coach_name, t.seat_name].filter(Boolean).join('车');
+            return [t.seat_type_name, bits].filter(Boolean).join(' ');
+          })
+          .filter(Boolean),
+        totalPrice: total,
+        payLimitTime,
+        payLimitTs: parseCnTimestamp(payLimitTime),
+      });
+    }
   }
 }
 
@@ -181,6 +186,14 @@ function toRow(a: AccumOrder): OrderRow {
     payLimitTime: a.payLimitTime,
     payLimitTs: a.payLimitTs,
   };
+}
+
+/** Pure normalization shared by network queries and offline regression checks. */
+export function normalizeOrders(completed: RawOrder[], incomplete: RawOrder[]): OrderRow[] {
+  const map = new Map<string, AccumOrder>();
+  ingestOrders(completed, map, false);
+  ingestOrders(incomplete, map, true);
+  return [...map.values()].map(toRow);
 }
 
 /**
