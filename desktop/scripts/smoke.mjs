@@ -11,7 +11,10 @@ const packaged = process.argv.includes('--packaged');
 const executable = packaged ? (process.platform === 'darwin'
   ? path.join(desktop, 'release', process.arch === 'arm64' ? 'mac-arm64' : 'mac', 'my12306.app/Contents/MacOS/my12306')
   : path.join(desktop, 'release', 'win-unpacked', 'my12306.exe')) : require('electron');
-const child = spawn(executable, packaged ? [] : [path.join(desktop, 'app')], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '', MY12306_DESKTOP_SMOKE: '1', MY12306_DESKTOP_TEST_DIR: dir }, stdio: ['ignore', 'pipe', 'pipe'] });
+const env = { ...process.env, MY12306_DESKTOP_SMOKE: '1', MY12306_DESKTOP_TEST_DIR: dir };
+// Windows treats an empty ELECTRON_RUN_AS_NODE as present, so delete it.
+for (const key of Object.keys(env)) if (key.toUpperCase() === 'ELECTRON_RUN_AS_NODE') delete env[key];
+const child = spawn(executable, packaged ? [] : [path.join(desktop, 'app')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
 let output = '';
 child.stdout.on('data', chunk => { output += chunk; process.stdout.write(chunk); });
 child.stderr.on('data', chunk => process.stderr.write(chunk));
