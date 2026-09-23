@@ -24,12 +24,14 @@ export interface TaskSnapshot {
   status: string;
   attempts: number;
   error: string | null;
-  result: { trainCode?: string; seatInfo?: string; seatInfoSource?: 'submitted' | 'order'; orderNo?: string } | null;
+  result: { paid?: boolean; trainCode?: string; seatInfo?: string; seatInfoSource?: 'submitted' | 'order'; orderNo?: string } | null;
   startedAt: string | null;
   finishedAt: string | null;
 }
 
 export interface PlanDateEntry {
+  manuallySkipped?: boolean;
+  cancellationPending?: boolean;
   travelDate: string;
   originalDate: string;
   weekday: number;
@@ -70,6 +72,8 @@ export interface PlanForm {
 }
 
 export const planApi = {
+  cancelAndSkip: (id: string, taskId: string) => http.post(`/plans/${id}/tasks/${taskId}/cancel-and-skip`, { confirmed: true }, { timeout: 90000 }).then(r => r.data),
+  skipDate: (id: string, date: string, skipped: boolean) => http.put(`/plans/${id}/dates/${date}/skip`, { skipped }).then(r => r.data),
   list: () => http.get('/plans').then((r) => r.data),
   save: (data: PlanForm) => http.post('/plans', data).then((r) => r.data),
   setStatus: (id: string, status: 'active' | 'paused' | 'deleted') =>

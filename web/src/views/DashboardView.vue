@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import CalendarDayHeader from '../components/CalendarDayHeader.vue';
+import { CALENDAR_WEEK_LABELS } from '../utils/calendar-day';
 import ShareImageDialog from '../components/ShareImageDialog.vue';
 import type { ShareContent } from '../utils/share-image';
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
@@ -77,7 +79,7 @@ interface DayCell {
 const calendarCells = computed<(DayCell | null)[]>(() => {
   const y = calMonth.value.getFullYear();
   const m = calMonth.value.getMonth();
-  const startWeekday = new Date(y, m, 1).getDay();
+  const startWeekday = (new Date(y, m, 1).getDay() + 6) % 7;
   const daysInMonth = new Date(y, m + 1, 0).getDate();
   const hmap = holidayMap.value;
   const today = todayStr.value;
@@ -172,7 +174,7 @@ function holidayOf(dateStr: string): HolidayDay | undefined {
 
 watch(calMonth, () => void reloadHolidays(), { immediate: false });
 
-const WEEK_LABELS = ['日', '一', '二', '三', '四', '五', '六'];
+const WEEK_LABELS = CALENDAR_WEEK_LABELS;
 
 /**
  * 车票日历数据（12306 未登录时优雅降级为空日历）。
@@ -376,16 +378,9 @@ function onVisible(): void {
                 class="cal-cell"
                 :class="{
                   'cal-today': cell.isToday,
-                  'cal-holiday': cell.hol?.holiday && !cell.hol?.isWorkday,
-                  'cal-makeUp': cell.hol?.holiday && cell.hol?.isWorkday,
-                  'cal-workday': !cell.hol?.holiday && cell.hol?.isWorkday,
-                  'cal-rest': !cell.hol?.holiday && !cell.hol?.isWorkday,
                 }"
               >
-                <div class="cal-day">
-                  {{ cell.day }}<span v-if="cell.hol?.holiday && !cell.hol?.isWorkday" class="cal-hol-tag">{{ cell.hol?.holiday }}</span>
-                  <span v-else-if="!cell.hol?.holiday && cell.hol?.isWorkday" class="cal-work-tag">班</span>
-                </div>
+                <CalendarDayHeader :date="cell.date" :holiday="cell.hol" :today="cell.isToday" />
                 <div
                   v-for="t in cell.tickets.slice(0, 1)"
                   :key="t.orderNo"
@@ -510,9 +505,9 @@ function onVisible(): void {
   margin-bottom: 5px;
 }
 .cal-cell {
-  min-height: 52px;
+  min-height: 64px;
   border: 1px solid #ebeef5;
-  border-radius: 5px;
+  border-radius: 8px;
   padding: 3px 5px;
   background: #fff;
   overflow: hidden;
@@ -533,49 +528,6 @@ function onVisible(): void {
 .cal-today {
   border-color: #409eff;
   box-shadow: inset 0 0 0 1px #409eff;
-}
-/* 节假日（背景淡红、日期数字红） */
-.cal-holiday {
-  background: #fef0f0;
-}
-.cal-holiday .cal-day {
-  color: #f56c6c;
-}
-.cal-hol-tag {
-  margin-left: 4px;
-  font-size: 9px;
-  font-weight: 400;
-  color: #f56c6c;
-  background: #fde2e2;
-  border-radius: 3px;
-  padding: 0 3px;
-}
-/* 调休补班日（命中节假日数据且为工作日，背景淡橙） */
-.cal-makeUp {
-  background: #fdf6ec;
-}
-.cal-makeUp .cal-day {
-  color: #e6a23c;
-}
-/* 普通周末（日期数字灰） */
-.cal-rest .cal-day {
-  color: #c0c4cc;
-}
-/* 普通工作日（蓝色「班」角标，不加背景，避免整月满屏色块） */
-.cal-work-tag {
-  margin-left: 4px;
-  font-size: 9px;
-  font-weight: 400;
-  color: #409eff;
-  background: #ecf5ff;
-  border-radius: 3px;
-  padding: 0 3px;
-}
-.cal-day {
-  font-size: 11px;
-  color: #606266;
-  font-weight: 600;
-  margin-bottom: 2px;
 }
 .cal-ticket {
   background: #f0f9eb;

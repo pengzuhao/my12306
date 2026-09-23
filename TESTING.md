@@ -101,3 +101,5 @@ node --import tsx server/src/__test__/ui-fixture.ts
 - 该 Ad-hoc 副本通过私有 HTTP、静态前端、SQLite、Chromium 153 启动和退出冒烟测试。所有操作使用临时应用副本/数据目录，未修改用户已安装应用的签名、安全标记或登录项。
 - 4 项隔离脚本测试通过：递归移除/恢复原值、其他元数据保留、重复运行、无标记、拒绝其他应用标识、符号链接不越出应用范围。Ad-hoc 签名不自动失效；恢复入口只恢复隔离属性，恢复原应用文件需从 DMG 重装。
 - 最终 `my12306-1.0.0-mac-arm64-unsigned-bundle.zip` 约 397 MiB，内部 6 个文件和外层 ZIP 的 SHA-256 全部匹配，脚本可执行权限保留；中文文件名采用标准 ZIP UTF-8 标记，避免部分解压工具乱码。
+
+计划详情日历与手动跳过：`npm run test:plan-status` 覆盖跳过持久化、重算/重启不重买、恢复、跨用户权限、整单待支付校验、取消成功/拒绝/结果不确定。`UI_TEST_PLAN_CALENDAR=1 UI_TEST_PORT=7791 node --import tsx server/src/__test__/ui-fixture.ts` 提供隔离交互测试；该模式取消操作为模拟，不连接 12306。

@@ -141,7 +141,7 @@ function fmtDay(d: Date): string {
  * @param days 查询最近多少天的订单（默认 90 天，覆盖整个预售期）
  * @returns 全部已完成订单（已按页顺序合并）
  */
-export async function fetchCompletedOrders(page: Page, days = 90): Promise<RawOrder[]> {
+export async function fetchCompletedOrders(page: Page, days = 90, strict = false): Promise<RawOrder[]> {
   const start = fmtDay(new Date(Date.now() - days * 86400_000));
   const end = fmtDay(new Date());
   const pageSize = 50;
@@ -154,18 +154,22 @@ export async function fetchCompletedOrders(page: Page, days = 90): Promise<RawOr
       `&query_where=G&sequeue_train_name=`;
     const raw = await postText(page, URLS.MY_ORDER_COMPLETE, body);
     if (!raw.trim()) {
+      if (strict) throw new Error('已完成订单查询未确认');
       logger.warn('已完成订单接口返回空（可能缺表单字段或登录失效）', { pageIndex });
       break;
     }
     const data = JSON.parse(raw) as {
+      status?: boolean;
       data?: { OrderDTODataList?: RawOrder[]; order_total_number?: number | string };
     };
+    if (strict && (data.status !== true || !Array.isArray(data.data?.OrderDTODataList))) throw new Error('已完成订单查询未确认');
     const list = data.data?.OrderDTODataList ?? [];
     all.push(...list);
     const total = Number(data.data?.order_total_number ?? 0);
     logger.info('已完成订单', { page: pageIndex, count: list.length, total });
     // 不满一页说明已是最后一页
     if (list.length < pageSize) break;
+    if (strict && pageIndex === 19) throw new Error('订单过多，无法完整核对');
   }
   return all;
 }

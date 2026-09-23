@@ -1,7 +1,10 @@
 <script setup lang="ts">
+import CalendarDayHeader from '../components/CalendarDayHeader.vue';
+import { CALENDAR_WEEK_LABELS } from '../utils/calendar-day';
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { useRouter } from 'vue-router';
+import PlanScheduleCalendar from '../components/PlanScheduleCalendar.vue';
 import {
   planApi,
   passengerApi,
@@ -71,7 +74,7 @@ interface PreviewEntry {
 // ---- 预览日历：按月展示推算出的购票日期 ----
 /** 预览日历当前展示的月份 */
 const pvMonth = ref(new Date());
-const WEEK_LABELS = ['日', '一', '二', '三', '四', '五', '六'];
+const WEEK_LABELS = CALENDAR_WEEK_LABELS;
 
 const pvTitle = computed(() => `${pvMonth.value.getFullYear()} 年 ${pvMonth.value.getMonth() + 1} 月`);
 
@@ -91,7 +94,7 @@ interface PvCell {
 const pvCells = computed<(PvCell | null)[]>(() => {
   const y = pvMonth.value.getFullYear();
   const m = pvMonth.value.getMonth();
-  const startWeekday = new Date(y, m, 1).getDay();
+  const startWeekday = (new Date(y, m, 1).getDay() + 6) % 7;
   const daysInMonth = new Date(y, m + 1, 0).getDate();
   const cells: (PvCell | null)[] = [];
   for (let i = 0; i < startWeekday; i++) cells.push(null);
@@ -510,6 +513,43 @@ async function preview(): Promise<void> {
 const detailVisible = ref(false);
 const detailPlan = ref<Plan | null>(null);
 const detailRows = ref<PlanDateEntry[]>([]);
+const detailView = ref('calendar');
+const skippingDate = ref(false);
+function canSkipDate(row: PlanDateEntry): boolean {
+  return !row.cancellationPending && row.travelDate >= todayCn() && detailPlan.value?.status !== 'deleted' && !['running', 'success'].includes(row.task?.status ?? '');
+}
+function canCancelDate(row: PlanDateEntry): boolean {
+  return row.task?.status === 'success' && row.task.result?.paid !== true && !!row.task.result?.orderNo;
+}
+async function cancelAndSkipDate(row: PlanDateEntry): Promise<void> {
+  if (!detailPlan.value || !row.task || skippingDate.value) return;
+  const id = detailPlan.value.id;
+  try {
+    await ElMessageBox.confirm(`确认取消 ${row.travelDate} 的整笔未支付订单 ${row.task.result?.orderNo}（包含该订单全部乘车人），并跳过当天购票？`, '取消订单并跳过', { confirmButtonText:'取消订单并跳过',cancelButtonText:'保留订单',type:'warning' });
+    skippingDate.value = true;
+    await planApi.cancelAndSkip(id,row.task.id);
+    ElMessage.success('订单已取消，该日期已跳过');
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') ElMessage.error((e as {response?:{data?:{error?:string}}}).response?.data?.error ?? '取消结果未确认，请刷新查看状态');
+  } finally {
+    if (skippingDate.value) await loadDetail(id);
+    skippingDate.value = false;
+  }
+}
+async function toggleSkipDate(row: PlanDateEntry): Promise<void> {
+  if (!detailPlan.value || skippingDate.value) return;
+  const id = detailPlan.value.id;
+  const skipped = !row.manuallySkipped;
+  try {
+    await ElMessageBox.confirm(skipped ? `跳过 ${row.travelDate}？该日期将不再自动购票，其他日期不受影响。` : `恢复 ${row.travelDate} 的购票安排？如果已开售，启用中的计划可能立即开始购票。`, skipped ? '跳过这一天' : '恢复购票', { confirmButtonText: skipped ? '确认跳过' : '确认恢复', cancelButtonText: '取消', type: 'warning' });
+    skippingDate.value = true;
+    await planApi.skipDate(id, row.travelDate, skipped);
+    await loadDetail(id);
+    ElMessage.success(skipped ? '已跳过该日期' : '已恢复购票安排');
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') ElMessage.error((e as {response?:{data?:{error?:string}}}).response?.data?.error ?? '修改失败，请重试');
+  } finally { skippingDate.value = false; }
+}
 /** 计划详情数据是否正在加载（也用于刷新按钮的 loading 态） */
 const detailLoading = ref(false);
 let detailRequestVersion = 0;
@@ -528,7 +568,7 @@ function detailStatus(row: PlanDateEntry): string {
   return planDateStatus(row, detailPlan.value?.status ?? 'active', loggedIn.value, detailNow.value);
 }
 const nextDetailRow = computed(() => detailRows.value.find(row => row.travelDate >= todayCn(detailNow.value)
-  && !['success', 'failed', 'skipped', 'cancelled'].includes(row.task?.status ?? '')));
+  && !row.manuallySkipped && !['success', 'failed', 'skipped', 'cancelled'].includes(row.task?.status ?? '')));
 
 const taskStatusType: Record<string, string> = {
   pending: 'info',
@@ -592,8 +632,8 @@ async function loadDetail(id: string, quiet = false): Promise<void> {
     if (detailPlan.value?.id !== id || version !== detailRequestVersion) return;
     detailNow.value = new Date();
     detailRows.value = rows;
-    if (!quiet && loggedIn.value && rows.some(row => row.task?.status === 'success' && row.task.result?.seatInfoSource !== 'order')) {
-      // Query official ticket details to repair legacy summaries, without retrying a purchase.
+    if (!quiet && loggedIn.value && rows.some(row => row.task?.status === 'success')) {
+      // Refresh payment status and repair legacy seat summaries without purchasing.
       try {
         await ordersApi.list();
         const fresh = await planApi.dates(id);
@@ -754,7 +794,7 @@ onMounted(async () => {
       v-model="detailVisible"
       :title="detailPlan ? `计划详情：${detailPlan.name}` : '计划详情'"
       direction="rtl"
-      size="min(560px, 100vw)"
+      size="min(760px, 100vw)"
       :before-close="closeDetail"
     >
       <template v-if="detailPlan">
@@ -786,7 +826,12 @@ onMounted(async () => {
           购票安排 <span class="detail-count">共 {{ detailRows.length }} 个乘车日期，已完成 {{ doneCount }}</span>
           <el-button class="detail-refresh" size="small" :loading="detailLoading" @click="refreshDetail">刷新</el-button>
         </div>
-        <el-table v-loading="detailLoading" :data="detailRows" border size="small" max-height="520">
+        <el-radio-group v-model="detailView" size="small" aria-label="购票安排显示方式" style="margin-bottom:12px">
+          <el-radio-button value="calendar">日历</el-radio-button>
+          <el-radio-button value="list">列表</el-radio-button>
+        </el-radio-group>
+        <PlanScheduleCalendar v-if="detailView === 'calendar' && detailRows.length > 0" :rows="detailRows" :status="detailStatus" :editable="canSkipDate" :busy="skippingDate" :cancelable="canCancelDate" @skip="toggleSkipDate" @cancel="cancelAndSkipDate" />
+        <el-table v-if="detailView === 'list'" v-loading="detailLoading" :data="detailRows" border size="small" max-height="520">
           <el-table-column label="乘车日期" prop="travelDate" width="110" />
           <el-table-column label="开售情况" width="150">
             <template #default="{ row }">
@@ -814,7 +859,7 @@ onMounted(async () => {
               <div v-else-if="row.task?.error">
                 <div class="mono" style="color: #f56c6c; font-size: 12px">{{ row.task.error }}</div>
                 <el-button
-                  v-if="row.task.status === 'failed' || row.task.status === 'skipped'"
+                  v-if="!row.manuallySkipped && (row.task.status === 'failed' || row.task.status === 'skipped')"
                   size="small"
                   link
                   type="primary"
@@ -824,6 +869,13 @@ onMounted(async () => {
                 >重试</el-button>
               </div>
               <div v-else style="color: #c0c4cc; font-size: 12px">—</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="安排" width="135" fixed="right">
+            <template #default="{ row }">
+              <el-button v-if="canSkipDate(row)" link type="primary" size="small" :loading="skippingDate" @click="toggleSkipDate(row)">{{ row.manuallySkipped ? '恢复购票' : '跳过' }}</el-button>
+              <el-button v-else-if="canCancelDate(row)" link type="danger" size="small" :loading="skippingDate" @click="cancelAndSkipDate(row)">取消订单并跳过</el-button>
+              <span v-else>—</span>
             </template>
           </el-table-column>
         </el-table>
@@ -1053,19 +1105,9 @@ onMounted(async () => {
               :class="{
                 'pv-has': cell.entry,
                 'pv-post': cell.entry?.postponed,
-                'pv-holiday': pvHolidayOf(cell.date)?.holiday && !pvHolidayOf(cell.date)?.isWorkday,
-                'pv-rest': !pvHolidayOf(cell.date)?.isWorkday && !pvHolidayOf(cell.date)?.holiday,
               }"
             >
-                <div class="pv-day">
-                {{ cell.day
-                }}<span v-if="pvHolidayOf(cell.date)?.holiday && !pvHolidayOf(cell.date)?.isWorkday" class="pv-hol-tag">{{
-                  pvHolidayOf(cell.date)?.holiday
-                }}</span>
-                <span v-else-if="pvHolidayOf(cell.date)?.holiday && pvHolidayOf(cell.date)?.isWorkday" class="pv-ban-tag">补班</span>
-                <span v-else-if="!pvHolidayOf(cell.date)?.holiday && pvHolidayOf(cell.date)?.isWorkday" class="pv-work-tag">班</span>
-                <span v-else-if="cell.entry" class="pv-wk"> 周{{ WEEK_LABELS[cell.entry.weekday % 7] }}</span>
-              </div>
+              <CalendarDayHeader :date="cell.date" :holiday="pvHolidayOf(cell.date)" :today="cell.date === todayCn()" />
               <div v-if="cell.entry" class="pv-entry" :title="cell.entry.note || (cell.entry.originalDate !== cell.entry.travelDate ? `原始推算 ${cell.entry.originalDate}` : '')">
                 <div class="pv-line">
                   <i class="pv-dot pv-ok" /><span>乘车</span>
@@ -1189,17 +1231,6 @@ onMounted(async () => {
   background: #fdf6ec;
   border-color: #f5dab1;
 }
-.pv-day {
-  font-size: 12px;
-  font-weight: 600;
-  color: #606266;
-  margin-bottom: 3px;
-}
-.pv-wk {
-  font-weight: 400;
-  color: #909399;
-  font-size: 10px;
-}
 .pv-entry {
   font-size: 11px;
 }
@@ -1214,47 +1245,6 @@ onMounted(async () => {
 }
 .pv-post .pv-dot {
   background: #e6a23c;
-}
-/* 节假日 */
-.pv-holiday {
-  background: #fef0f0;
-  border-color: #fbc4c4;
-}
-.pv-holiday .pv-day {
-  color: #f56c6c;
-}
-.pv-hol-tag {
-  margin-left: 3px;
-  font-size: 9px;
-  font-weight: 400;
-  color: #f56c6c;
-  background: #fde2e2;
-  border-radius: 3px;
-  padding: 0 3px;
-}
-/* 调休补班日 */
-.pv-ban-tag {
-  margin-left: 3px;
-  font-size: 9px;
-  font-weight: 400;
-  color: #e6a23c;
-  background: #fdf6ec;
-  border-radius: 3px;
-  padding: 0 3px;
-}
-/* 普通休息日（周末） */
-.pv-rest .pv-day {
-  color: #c0c4cc;
-}
-/* 普通工作日（蓝色「班」角标，不加背景，避免与乘车日/顺延日的底色冲突） */
-.pv-work-tag {
-  margin-left: 3px;
-  font-size: 9px;
-  font-weight: 400;
-  color: #409eff;
-  background: #ecf5ff;
-  border-radius: 3px;
-  padding: 0 3px;
 }
 .pv-sale {
   color: #909399;

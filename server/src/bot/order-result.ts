@@ -13,5 +13,5 @@ export function verifiedOrderResult(task: Task, plan: Plan, passengerNames: stri
     && order.seats.length === order.passengers.length && order.seats.every(seat => seat.trim()));
   if (hits.length !== 1 || !passengerNames.length) return null;
   const order = hits[0];
-  return { ...task.result, seatInfo: order.seats.join('；'), seatInfoSource: 'order', orderNo: order.orderNo };
+  return { ...task.result, seatInfo: order.seats.join('；'), seatInfoSource: 'order', orderNo: order.orderNo, paid: order.status === 'paid' };
 }

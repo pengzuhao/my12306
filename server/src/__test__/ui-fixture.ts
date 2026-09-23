@@ -7,7 +7,7 @@ process.env.MY12306_DATA_DIR = dir;
 process.env.MY12306_ADMIN_USER = 'uitestadmin';
 process.env.MY12306_ADMIN_PASSWORD = 'UITestOnly-12345';
 const year = new Date().getFullYear();
-fs.writeFileSync(path.join(dir, 'holidays.json'), JSON.stringify(Object.fromEntries([year - 1, year, year + 1].map(y => [y, {}]))));
+fs.writeFileSync(path.join(dir, 'holidays.json'), JSON.stringify(Object.fromEntries([year - 1, year, year + 1].map(y => [y, process.env.UI_TEST_PLAN_CALENDAR ? { [`${y}-10-01`]: {name:'国庆节',isOffDay:true}, [`${y}-09-20`]: {name:'调休',isOffDay:false} } : {}]))));
 const { default: Fastify } = await import('fastify');
 const { default: websocket } = await import('@fastify/websocket');
 const { default: staticFiles } = await import('@fastify/static');
@@ -29,6 +29,19 @@ if (process.env.UI_TEST_TRAIN_VARIANTS) {
   const { today, addDays } = await import('../calendar/holidays.js');
   PlansRepo.save({ id: 'variants', userId: 'system', name: '同车次区间测试', status: 'paused', fromStation: '南京', toStation: '上海', dateMode: 'single', travelDate: addDays(today(), 1), weekday: null, weekEdge: null, weekInterval: 1, offsetDays: 0, validFrom: today(), validUntil: null, timeFrom: '08:00', timeTo: '09:00', trainNumbers: null, trainSegments: [], seatPositions: [], seatTypes: ['ZE'], allowNoSeat: false, passengerIds: PassengersRepo.list('system').map(p => p.id) });
 }
+if (process.env.UI_TEST_PLAN_CALENDAR) {
+  const { today, addDays } = await import('../calendar/holidays.js');
+  const { PlanDatesRepo } = await import('../db/repo.js');
+  const base = today();
+  PlansRepo.save({ id: 'calendar-demo', userId: 'system', name: '下班（日历测试）', status: 'paused', fromStation: '上海', toStation: '南京', dateMode: 'recurring', travelDate: null, weekday: 5, weekEdge: null, weekInterval: 1, offsetDays: 0, validFrom: base, validUntil: null, timeFrom: '18:00', timeTo: '20:00', trainNumbers: null, seatPositions: [], seatTypes: ['ZE'], allowNoSeat: false, passengerIds: [] });
+  const entries = [1, 3, 8, 15, 22, 29].map(n => ({ travelDate: addDays(base,n), originalDate: addDays(base,n), postponed: false, weekday: 5 }));
+  PlanDatesRepo.replaceForPlan('calendar-demo', entries);
+  for (const [i,e] of entries.entries()) {
+    if (i > 2) continue;
+    const task = TasksRepo.create({ planId:'calendar-demo', userId:'system', planDateId:null, travelDate:e.travelDate, trainNumber:'G76', saleAt:base+'T00:00:00Z', status:i===0?'failed':i===1?'success':'pending' });
+    if (i===1) TasksRepo.update(task.id,{result:{trainCode:'G76',seatInfo:'二等座',seatInfoSource:'order',paid:false,orderNo:'UI_UNPAID_ONLY'}});
+  }
+}
 const app = Fastify();
 let seatResultVerified = false;
 let taskProgressReads = 0;
@@ -36,6 +49,12 @@ registerAuth(app);
 await app.register(websocket);
 app.get('/ws', { websocket: true }, socket => socket.send(JSON.stringify({ type: 'status', payload: { connected: true } })));
 app.addHook('onRequest', async (request, reply) => {
+  if (process.env.UI_TEST_PLAN_CALENDAR && request.method === 'POST' && request.url.endsWith('/cancel-and-skip')) {
+    const taskId = request.url.split('/')[5];
+    const { cancelPlanOrderAndSkip } = await import('../plans/cancel-order.js');
+    await cancelPlanOrderAndSkip('system','calendar-demo',taskId,async (_user,_target,begin) => { begin(); });
+    return reply.send({ok:true});
+  }
   if (process.env.UI_TEST_TASK_PROGRESS && request.url === '/api/plans/detail-demo/dates') {
     const interrupted = ++taskProgressReads > 1;
     return reply.send([{ travelDate: '2026-09-24', originalDate: '2026-09-24', weekday: 4, postponed: false, isWorkday: true, estimatedSaleDate: '2026-09-10', task: {

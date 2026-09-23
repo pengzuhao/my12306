@@ -143,3 +143,18 @@ CREATE TABLE IF NOT EXISTS notification_channels (
   last_status TEXT, last_sent_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS app_migrations (name TEXT PRIMARY KEY);
+
+-- 用户明确跳过的乘车日，独立于日期重算和任务生命周期保存。
+CREATE TABLE IF NOT EXISTS plan_date_skips (
+  plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  travel_date TEXT NOT NULL,
+  PRIMARY KEY (plan_id, travel_date)
+);
+
+-- 取消请求结果不确定时阻止自动补订，重启后继续保留。
+CREATE TABLE IF NOT EXISTS plan_date_cancellations (
+  plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  travel_date TEXT NOT NULL,
+  order_no TEXT NOT NULL,
+  PRIMARY KEY (plan_id, travel_date)
+);

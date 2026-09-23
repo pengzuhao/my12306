@@ -3,7 +3,7 @@
  */
 import type { FastifyInstance, FastifyPluginCallback } from 'fastify';
 import { z } from 'zod';
-import { PassengersRepo, PlansRepo, PlanDatesRepo, TasksRepo, RailwayAccountRepo } from '../db/repo.js';
+import { PassengersRepo, PlansRepo, PlanDatesRepo, PlanDateSkipsRepo, TasksRepo, RailwayAccountRepo } from '../db/repo.js';
 import { currentUser } from './auth.routes.js';
 import { previewForPlan } from '../plans/date-engine.js';
 import { ensureYears, isWorkday, holidayName, addDays, isYearDegraded, today } from '../calendar/holidays.js';
@@ -194,6 +194,7 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
     const plan = PlansRepo.get(id);
     if (!plan || plan.userId !== user.id) return reply.code(404).send({ error: '计划不存在' });
     const tasks = TasksRepo.list(user.id, 200);
+    const skippedDates = new Set(PlanDateSkipsRepo.list(id));
 
     // 1) 优先返回已持久化的推算结果（调度器每 5 分钟刷新入库）。
     //    详情展示的是"执行历史"，用库里的数据即可，不必每次实时推算——
@@ -204,6 +205,8 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
         const task = tasks.find((t) => t.planId === id && t.travelDate === d.travelDate) ?? null;
         return {
           travelDate: d.travelDate,
+          manuallySkipped: skippedDates.has(d.travelDate),
+          cancellationPending: PlanDateSkipsRepo.cancelling(id, d.travelDate),
           originalDate: d.originalDate,
           weekday: d.weekday,
           postponed: d.postponed,
@@ -222,13 +225,45 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
       const entries = await previewForPlan(plan);
       return entries.map((e) => {
         const task = tasks.find((t) => t.planId === id && t.travelDate === e.travelDate) ?? null;
-        return { ...e, task };
+        return { ...e, manuallySkipped: skippedDates.has(e.travelDate), cancellationPending: PlanDateSkipsRepo.cancelling(id, e.travelDate), task };
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logger.warn('计划详情推算失败，返回空列表等调度器刷新', { plan: plan.name, error: msg });
       return [];
     }
+  });
+
+  app.post('/api/plans/:id/tasks/:taskId/cancel-and-skip', async (request, reply) => {
+    const user = currentUser(request);
+    const { id, taskId } = request.params as { id: string; taskId: string };
+    const plan = PlansRepo.get(id), task = TasksRepo.get(taskId);
+    if (!plan || plan.userId !== user.id || !task || task.planId !== id) return reply.code(404).send({ error: '计划或任务不存在' });
+    if ((request.body as { confirmed?: boolean } | null)?.confirmed !== true) return reply.code(400).send({ error: '请确认取消整笔未支付订单并跳过该日期' });
+    try {
+      const { cancelPlanOrderAndSkip } = await import('../plans/cancel-order.js');
+      await cancelPlanOrderAndSkip(user.id, id, taskId);
+      wsHub.broadcastToUser(user.id, { type: 'task', payload: TasksRepo.get(taskId) });
+      return { ok: true };
+    } catch (e) {
+      return reply.code(409).send({ error: (e as Error).message });
+    }
+  });
+
+  app.put('/api/plans/:id/dates/:date/skip', async (request, reply) => {
+    const user = currentUser(request);
+    const { id, date } = request.params as { id: string; date: string };
+    const plan = PlansRepo.get(id);
+    if (!plan || plan.userId !== user.id) return reply.code(404).send({ error: '计划不存在' });
+    const parsed = z.object({ skipped: z.boolean() }).safeParse(request.body);
+    if (!parsed.success || !dateSchema.safeParse(date).success) return reply.code(400).send({ error: '日期或跳过参数无效' });
+    if (date < today() || plan.status === 'deleted') return reply.code(409).send({ error: '已结束的日期或计划不能修改' });
+    const saved = PlanDatesRepo.list(id).some(d => d.travelDate === date);
+    if (!saved && !(await previewForPlan(plan)).some(d => d.travelDate === date)) return reply.code(404).send({ error: '该日期不在计划中' });
+    try { PlanDateSkipsRepo.set(id, date, parsed.data.skipped); }
+    catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
+    logger.info(parsed.data.skipped ? '手动跳过乘车日期' : '恢复乘车日期', { plan: plan.name, travelDate: date });
+    return { ok: true };
   });
 
   /**
@@ -245,6 +280,7 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
     if (!plan || plan.userId !== user.id) return reply.code(404).send({ error: '计划不存在' });
     const task = TasksRepo.get(taskId);
     if (!task || task.planId !== id) return reply.code(404).send({ error: '任务不存在' });
+    if (PlanDateSkipsRepo.has(id, task.travelDate)) return reply.code(409).send({ error: '该日期已手动跳过，请先恢复购票安排' });
     if (plan.status !== 'active') return reply.code(409).send({ error: '请先恢复计划后再重试' });
     if (!['failed', 'skipped'].includes(task.status)) return reply.code(409).send({ error: '只能重试失败或已跳过的任务' });
     if (task.travelDate < today()) return reply.code(400).send({ error: '乘车日期已过，无法重试' });

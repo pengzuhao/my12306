@@ -289,6 +289,49 @@ export const PlansRepo = {
   },
 };
 
+export const PlanDateSkipsRepo = {
+  cancelling(planId: string, date: string): boolean {
+    return !!getDb().prepare('SELECT 1 FROM plan_date_cancellations WHERE plan_id = ? AND travel_date = ?').get(planId, date);
+  },
+  beginCancellation(planId: string, date: string, orderNo: string): void {
+    getDb().prepare('INSERT OR IGNORE INTO plan_date_cancellations VALUES (?, ?, ?)').run(planId, date, orderNo);
+  },
+  clearCancellation(planId: string, date: string): void {
+    getDb().prepare('DELETE FROM plan_date_cancellations WHERE plan_id = ? AND travel_date = ?').run(planId, date);
+  },
+  finishCancellation(planId: string, date: string, orderNo: string): void {
+    const db = getDb();
+    db.transaction(() => {
+      db.prepare('INSERT OR IGNORE INTO plan_date_skips VALUES (?, ?)').run(planId,date);
+      db.prepare("UPDATE tasks SET status = 'skipped', error = '已取消未支付订单并手动跳过', finished_at = datetime('now'), updated_at = datetime('now') WHERE plan_id = ? AND travel_date = ? AND json_extract(result, '$.orderNo') = ?").run(planId,date,orderNo);
+      db.prepare("UPDATE plan_dates SET status = 'pending' WHERE plan_id = ? AND travel_date = ?").run(planId,date);
+      this.clearCancellation(planId,date);
+    })();
+  },
+  has(planId: string, date: string): boolean {
+    return !!getDb().prepare('SELECT 1 FROM plan_date_skips WHERE plan_id = ? AND travel_date = ?').get(planId, date) || this.cancelling(planId, date);
+  },
+  list(planId: string): string[] {
+    return (getDb().prepare('SELECT travel_date FROM plan_date_skips WHERE plan_id = ?').all(planId) as { travel_date: string }[]).map(r => r.travel_date);
+  },
+  set(planId: string, date: string, skipped: boolean): void {
+    const db = getDb();
+    db.transaction(() => {
+      if (this.cancelling(planId, date)) throw new Error('订单取消结果待核实，请先核对 12306 订单');
+      if (db.prepare("SELECT 1 FROM tasks WHERE plan_id = ? AND travel_date = ? AND status IN ('running', 'success')").get(planId, date)) {
+        throw new Error('正在购票或已购票的日期不能修改跳过安排');
+      }
+      if (skipped) {
+        db.prepare('INSERT OR IGNORE INTO plan_date_skips VALUES (?, ?)').run(planId, date);
+        db.prepare("UPDATE tasks SET status = 'skipped', error = '手动跳过该乘车日期', finished_at = datetime('now'), updated_at = datetime('now') WHERE plan_id = ? AND travel_date = ? AND status NOT IN ('running', 'success')").run(planId, date);
+      } else {
+        db.prepare('DELETE FROM plan_date_skips WHERE plan_id = ? AND travel_date = ?').run(planId, date);
+        db.prepare("UPDATE tasks SET status = 'pending', error = NULL, sale_at = NULL, attempts = 0, started_at = NULL, finished_at = NULL, updated_at = datetime('now') WHERE plan_id = ? AND travel_date = ? AND status = 'skipped' AND error IN ('手动跳过该乘车日期', '已取消未支付订单并手动跳过')").run(planId, date);
+      }
+    })();
+  },
+};
+
 export const PlanDatesRepo = {
   /** 用本次推算结果整体覆盖该计划的日期（保留既有 travel_date 以便任务关联） */
   replaceForPlan(planId: string, entries: { travelDate: string; originalDate: string; postponed: boolean; weekday: number }[]): void {
@@ -420,7 +463,7 @@ export const TasksRepo = {
          WHERE status IN ('queried')
            AND sale_at IS NOT NULL
            AND julianday(sale_at) <= julianday(?)
-           AND ${eligibleUserSql('tasks')} AND EXISTS (SELECT 1 FROM plans WHERE plans.id = tasks.plan_id AND plans.status = 'active')
+           AND NOT EXISTS (SELECT 1 FROM plan_date_skips s WHERE s.plan_id = tasks.plan_id AND s.travel_date = tasks.travel_date) AND NOT EXISTS (SELECT 1 FROM plan_date_cancellations c WHERE c.plan_id = tasks.plan_id AND c.travel_date = tasks.travel_date) AND ${eligibleUserSql('tasks')} AND EXISTS (SELECT 1 FROM plans WHERE plans.id = tasks.plan_id AND plans.status = 'active')
          ORDER BY julianday(sale_at) ASC
          LIMIT ?`,
       )
@@ -429,7 +472,7 @@ export const TasksRepo = {
   },
   listPending(limit = 50): Task[] {
     const rows = getDb()
-      .prepare(`SELECT * FROM tasks WHERE status = 'pending' AND ${eligibleUserSql('tasks')} AND EXISTS (SELECT 1 FROM plans WHERE plans.id = tasks.plan_id AND plans.status = 'active') ORDER BY travel_date ASC, created_at ASC LIMIT ?`)
+      .prepare(`SELECT * FROM tasks WHERE status = 'pending' AND NOT EXISTS (SELECT 1 FROM plan_date_skips s WHERE s.plan_id = tasks.plan_id AND s.travel_date = tasks.travel_date) AND NOT EXISTS (SELECT 1 FROM plan_date_cancellations c WHERE c.plan_id = tasks.plan_id AND c.travel_date = tasks.travel_date) AND ${eligibleUserSql('tasks')} AND EXISTS (SELECT 1 FROM plans WHERE plans.id = tasks.plan_id AND plans.status = 'active') ORDER BY travel_date ASC, created_at ASC LIMIT ?`)
       .all(limit) as Record<string, unknown>[];
     return rows.map(rowToTask);
   },
@@ -451,7 +494,7 @@ export const TasksRepo = {
         `UPDATE tasks
          SET status = 'pending', sale_at = NULL, error = NULL, finished_at = NULL,
              started_at = NULL, attempts = 0, updated_at = datetime('now')
-         WHERE travel_date LIKE ? AND status IN ('queried', 'skipped', 'pending')`,
+         WHERE travel_date LIKE ? AND status IN ('queried', 'skipped', 'pending') AND NOT EXISTS (SELECT 1 FROM plan_date_skips s WHERE s.plan_id = tasks.plan_id AND s.travel_date = tasks.travel_date) AND NOT EXISTS (SELECT 1 FROM plan_date_cancellations c WHERE c.plan_id = tasks.plan_id AND c.travel_date = tasks.travel_date)`,
       )
       .run(`${year}-%`);
     return info.changes;

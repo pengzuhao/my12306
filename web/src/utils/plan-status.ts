@@ -13,6 +13,9 @@ export function saleLabel(row: PlanDateEntry, now = new Date()): string {
 }
 
 export function planDateStatus(row: PlanDateEntry, planStatus: string, loggedIn: boolean, now = new Date()): string {
+  if (row.cancellationPending) return '取消待核实';
+  if (row.task?.status === 'success' && row.task.result?.paid === false) return '待支付';
+  if (row.manuallySkipped) return '手动跳过';
   const status = row.task?.status;
   if (status === 'failed' && row.task?.error?.startsWith('执行中断：')) return '执行中断';
   const finalNames: Record<string, string> = { success: '已购票', failed: '购票失败', skipped: '已跳过', cancelled: '已取消', running: '正在购票', queued: '排队中' };
