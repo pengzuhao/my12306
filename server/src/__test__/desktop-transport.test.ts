@@ -27,6 +27,15 @@ test('desktop API and user-scoped events work without listening', async () => {
     assert.equal((await request({ url: '/api/health' })).status, 200);
     const posted = await request({ method: 'POST', url: '/api/echo?keyword=%E8%BD%A6%E7%A5%A8', headers: { 'content-type': 'application/json' }, body: Buffer.from('{"name":"上班"}') });
     assert.deepEqual(JSON.parse(posted.body), { body: { name: '上班' }, query: { keyword: '车票' } });
+    for (const body of [undefined, new Uint8Array(0)]) {
+      for (const type of ['application/x-www-form-urlencoded', 'application/json', undefined]) {
+        const headers = type ? { 'Content-Type': type, 'Content-Length': '0' } : {};
+        const empty = await request({ method:'POST', url:'/api/echo', headers, body });
+        assert.equal(empty.status,200,`bodyless action must reach the route: ${empty.body}`);
+        assert.deepEqual(JSON.parse(empty.body),{query:{}});
+      }
+    }
+    assert.equal((await request({method:'POST',url:'/api/echo',headers:{'content-type':'application/x-www-form-urlencoded'},body:Buffer.from('name=test')})).status,415,'nonempty unsupported content must still be rejected');
     assert.deepEqual((await request({ url: '/api/export' })).body, bytes);
     assert.equal((await request({ url: '/api/failure' })).status, 409);
     assert.equal((await request({ url: '//evil.test/api/health' })).status, 500);

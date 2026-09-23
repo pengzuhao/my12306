@@ -7,6 +7,16 @@ export const http = axios.create({
   adapter: typeof location !== 'undefined' && location.protocol === 'my12306:' ? 'fetch' : undefined,
 });
 
+// Bodyless actions still use JSON: Axios Fetch otherwise supplies a form Content-Type,
+// which Fastify does not parse. Keep explicit payloads and their media types untouched.
+http.interceptors.request.use(config => {
+  if (config.method?.toLowerCase() === 'post' && config.data === undefined) {
+    config.data = {};
+    config.headers.set('Content-Type', 'application/json');
+  }
+  return config;
+});
+
 // ---- 乘车人 ----
 export const passengerApi = {
   list: () => http.get('/passengers').then((r) => r.data),

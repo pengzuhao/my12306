@@ -9,6 +9,14 @@ module.exports = async function smoke({ origin, requestBackend, webSession, brow
   assert.equal((await webSession.fetch(origin + '/api/plans')).status, 200, 'SQLite and API work inside Electron');
   const invalid = await webSession.fetch(origin + '/api/plans', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   assert.equal(invalid.status, 400, 'POST body and error status preserved');
+  // This previously failed with 415 before reaching the session route.
+  // The isolated profile has no account: a meaningful 400 proves dispatch works.
+  for (const headers of [{}, { 'content-type':'application/x-www-form-urlencoded' }]) {
+    const sync = await webSession.fetch(origin + '/api/session/sync-passengers', { method:'POST', headers });
+    assert.equal(sync.status,400,'empty POST must reach passenger synchronization route');
+    assert.match((await sync.json()).error,/12306 未登录/);
+  }
+  console.log('PASS bodyless passenger sync reaches API (no real account)');
   const csv = await webSession.fetch(origin + '/api/logs/export');
   assert.equal(csv.status, 200); assert.match(csv.headers.get('content-type'), /csv/);
   assert.ok((await csv.arrayBuffer()).byteLength > 0, 'binary export preserved');
