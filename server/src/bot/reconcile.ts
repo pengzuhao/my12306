@@ -31,7 +31,7 @@ export interface PurchasedTicket {
 
 /** 归一化日期（去分隔符）和车次（去空格大写）后比较 */
 function normDate(d: string): string {
-  return d.replace(/\D/g, '');
+  return d.replace(/\D/g, '').slice(0, 8);
 }
 function normCode(c: string): string {
   return c.replace(/\s/g, '').toUpperCase();
@@ -48,7 +48,7 @@ function normCode(c: string): string {
  *    跨日车（如 D5 从北京始发、南京 06:52 上车）会差一天，不能用
  *  - 未完成订单里的票未必都是"待支付"：用 ticket_status_name 精确区分
  */
-function collectFromOrders(
+export function collectFromOrders(
   orders: RawOrder[],
   map: Map<string, PurchasedTicket>,
   fromIncomplete: boolean,
@@ -59,7 +59,7 @@ function collectFromOrders(
       // 乘车日期优先取页面展示值（带时间），退而取 train_date
       const d = normDate(String(t.start_train_date_page ?? t.train_date ?? ''));
       const c = normCode(String(t.stationTrainDTO?.station_train_code ?? ''));
-      if (!d || !c) continue;
+      if (d.length !== 8 || !c) continue;
       const st = String(t.ticket_status_name ?? '');
       const isUnpaid = fromIncomplete && st.includes('待支付');
       // 支付截止时间：只有"待支付"票才有意义（已完成订单的 pay_limit_time 是 2099 哨兵值）。
@@ -74,8 +74,7 @@ function collectFromOrders(
  * 查询当前账户的全部"已购"车票（未完成 + 已完成）。
  * 返回值 key = `${date}|${trainCode}`（归一化），value = 状态。
  *
- * 两个接口任一失败都 fail-open（返回能拿到的部分），不阻断对账主流程；
- * 都失败时返回 null，调用方应跳过本轮对账。
+ * 任一接口失败都返回 null：缺失的查询结果不能作为车票已失效的证据。
  */
 export async function queryPurchasedTickets(context: BrowserContext): Promise<Map<string, PurchasedTicket> | null> {
   const page = await context.newPage();
@@ -85,28 +84,29 @@ export async function queryPurchasedTickets(context: BrowserContext): Promise<Ma
     await warmOrderPage(page);
 
     const map = new Map<string, PurchasedTicket>();
-    let anyOk = false;
+    let allOk = true;
 
     // 1) 未完成订单（未支付/待出票）——POST，列表在 data.orderDBList
     try {
-      const list = await fetchIncompleteOrders(page);
+      const list = await fetchIncompleteOrders(page, true);
       collectFromOrders(list, map, true);
-      anyOk = true;
+
     } catch (e) {
-      logger.warn('对账：未完成订单查询失败', e);
+      allOk = false;
+      logger.warn('对账：未完成订单查询失败，跳过本轮', e);
     }
 
     // 2) 已完成订单（已支付/已出票）——POST 分页，列表在 data.OrderDTODataList
     try {
-      const list = await fetchCompletedOrders(page);
+      const list = await fetchCompletedOrders(page, 90, true);
       collectFromOrders(list, map, false);
-      anyOk = true;
+
     } catch (e) {
-      // 已完成接口失败时降级：仅用未完成订单（回滚逻辑仍可工作——未支付订单消失即回滚信号）
-      logger.warn('对账：已完成订单查询失败，降级为仅未完成订单', e);
+      allOk = false;
+      logger.warn('对账：已完成订单查询失败，跳过本轮', e);
     }
 
-    return anyOk ? map : null;
+    return allOk ? map : null;
   } finally {
     await page.close().catch(() => undefined);
   }

@@ -266,7 +266,7 @@ async function reconcileBeforeSale(): Promise<void> {
         return;
       }
       if (!purchased) {
-        logger.warn('对账：订单查询全部失败，跳过本轮', { plan: plan.name });
+        logger.warn('对账：订单查询不完整，跳过本轮', { plan: plan.name });
         return;
       }
       for (const d of dates) {
@@ -293,7 +293,7 @@ async function reconcileBeforeSale(): Promise<void> {
 
 /** 已购集合里是否存在该日期的任一车次（查重/对账用，车次未指定时按日期匹配） */
 function findByDateAndAnyCode(purchased: Map<string, { orderNo: string; status: string }>, travelDate: string): boolean {
-  // key 的日期部分可能带时间（"202609280652|D5"），只取前 8 位日期做前缀
+  // 对账集合统一使用 YYYYMMDD|车次，与票面时分无关
   const prefix = `${travelDate.replace(/\D/g, '').slice(0, 8)}|`;
   for (const key of purchased.keys()) {
     if (key.slice(0, prefix.length) === prefix) return true;

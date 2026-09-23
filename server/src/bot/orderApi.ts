@@ -122,13 +122,15 @@ async function postText(page: Page, url: string, body: string): Promise<string> 
  * 未完成订单（待支付/待出票）。
  * 请求体固定 `_json_att=`（12306 前端原样）；无未完成订单时响应里没有 data 字段。
  */
-export async function fetchIncompleteOrders(page: Page): Promise<RawOrder[]> {
+export async function fetchIncompleteOrders(page: Page, strict = false): Promise<RawOrder[]> {
   const raw = await postText(page, URLS.MY_ORDER_NO_COMPLETE, '_json_att=');
   if (!raw.trim()) {
+    if (strict) throw new Error('未完成订单查询未确认');
     logger.warn('未完成订单接口返回空');
     return [];
   }
-  const data = JSON.parse(raw) as { data?: { orderDBList?: RawOrder[] } };
+  const data = JSON.parse(raw) as { status?: boolean; messages?: string[]; data?: { existError?: string; orderDBList?: RawOrder[] } };
+  if (strict && (data.status !== true || data.data?.existError === 'Y' || (data.messages?.length ?? 0) > 0 || (data.data?.orderDBList != null && !Array.isArray(data.data.orderDBList)))) throw new Error('未完成订单查询未确认');
   return data.data?.orderDBList ?? [];
 }
 
