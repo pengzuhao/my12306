@@ -1,10 +1,56 @@
-> Windows / macOS 独立桌面版、托盘、开机启动与安装包构建：[桌面版说明](desktop/README.md)。原有服务版继续可用。
-
 # my12306
 
 TypeScript / Fastify / Vue 3 实现的 12306 购票管理台。支持车票日历、余票查询、周期购票计划和多通道通知。自动购票成功后由用户在 12306 完成支付。
 
-## 启动
+## 最近更新
+
+- **桌面版**：支持 macOS / Windows 独立运行、托盘后台运行、登录电脑后自动后台启动；通过私有 IPC 通信，不监听服务端口。
+- **计划日历**：详情支持日历 / 列表切换；首页、计划预览和详情统一显示工作日、休息日、补班及节日名称，均从周一开始排列。
+- **按日跳过**：可跳过或恢复某个乘车日期，重启和日期重算后仍保留。待支付订单可确认取消整单并跳过；取消结果不确定时暂停该日自动购票，避免重复下单。
+- **购票修复**：按有效日期及出发时间段查询；同车次不同乘降站独立选择；修正席别显示、页面跳转和中断任务状态。失败任务不会因打开详情而重试。
+- **登录与通知**：二维码支持自动 / 手动刷新；修复通知编辑保存、官方通知接口的代理 Fake-IP 兼容，以及桌面端同步乘车人等无参数操作的 `415 Unsupported Media Type` 错误。
+- **安装包瘦身**：内置 Chromium Headless Shell 和中英文资源，Mac DMG 使用 LZFSE 压缩；当前 Apple 芯片内测整包约 223 MB。
+
+## 安装包打包
+
+在目标平台和对应架构的电脑上构建。需要 Node.js ≥ 22.12（建议 24 LTS）；Mac 内测整包还需要 Python 3。以下命令在仓库根目录执行。
+
+首次准备依赖：
+
+```sh
+npm ci
+npm run desktop:install
+```
+
+每次修改代码后，先构建并检查：
+
+```sh
+npm test
+npm run desktop:prepare
+```
+
+**macOS 内测包（无需开发者证书）**：
+
+```sh
+npm --prefix desktop run dist:unsigned -- --mac dmg
+npm --prefix desktop run smoke -- --packaged
+npm --prefix desktop run bundle:macos
+```
+
+输出：`desktop/release/my12306-<版本>-mac-<架构>-unsigned-bundle.zip`。把整个 ZIP 发给测试用户，里面包含 DMG、简短使用说明、应用打不开时的辅助脚本及校验清单；ZIP 旁另有 `.sha256` 文件。Apple 芯片为 `arm64`，Intel 为 `x64`，默认使用构建机架构。
+
+**Windows 内测包**（在 Windows 上执行）：
+
+```sh
+npm --prefix desktop run dist:unsigned -- --win nsis
+npm --prefix desktop run smoke -- --packaged
+```
+
+安装程序位于 `desktop/release/`，文件名带 `-unsigned.exe`。用户无需安装 Node.js 或浏览器。
+
+正式签名构建使用 `dist:signed`，需配置平台证书，macOS 还需公证凭据。也可在 GitHub **Actions → Desktop installers → Run workflow** 选择签名模式，下载构建产物。具体配置、数据目录及后台运行说明见 [桌面版说明](desktop/README.md)。
+
+## 服务版启动
 
 ```sh
 npm install
@@ -41,7 +87,7 @@ export MY12306_ADMIN_PASSWORD
 ## 购票、日志和图片分享
 
 - 在「购票计划」选择乘车人、车站、日期规则、车次、席别与时间范围。工作周规则根据节假日与调休推算，可先预览日期。
-- 根据起售时间触发任务，暂停计划会阻止后续购票。购票成功后不会自动付款。
+- 根据起售时间触发任务，暂停计划会阻止后续购票。购票成功后不会自动付款；取消待支付订单会影响该订单的全部乘车人，操作前会明确确认。
 - 「过程日志」支持级别、分类、关键词、时间范围查询，管理员还可筛选用户。默认每页 30 条，可一键导出筛选结果 CSV（最多 5 万条，请按日期分批）。导出时间为北京时间。API `/api/logs/export?format=json` 也可下载 JSON。
 - 记录、展示和导出时隐藏密钥、链接、手机号、证件字段。日志保存在 SQLite 中，无自动清理策略。
 - 日历「分享日历」、已购车票「分享到微信」、车票详情均可生成 PNG 图片。图片在浏览器本地生成，默认隐藏乘车人和座位；订单号、证件号与手机号不进入图片。
@@ -61,7 +107,7 @@ export MY12306_ADMIN_PASSWORD
 
 通用 Webhook 收到 `{ source: "my12306", event, text, urgent, timestamp }` JSON；HTTP 2xx 视为成功。其他平台还检查响应中的业务成功码。每通道独立发送，某通道失败不会阻止其他通道；页面和日志记录发送结果。不会自动重试通知，避免重复消息。
 
-地址必须为标准 443 端口的 HTTPS，发送时固定解析到的公网 IPv4，不允许内网、本机地址和重定向。仅 IPv6 的 Webhook 暂不支持。平台若启用关键词，请允许 `12306`，签名密钥与平台配置保持一致。购票成功等紧急消息在飞书、企业微信和钉钉尝试群内 @所有人，实际提醒效果由平台和群权限决定。
+地址必须为标准 443 端口的 HTTPS，发送时固定解析到的 IPv4，不允许内网、本机地址和重定向。官方通知接口兼容代理的 `198.18.0.0/15` Fake-IP，仍校验原始域名的 HTTPS 证书；通用 Webhook 必须解析到公网地址。仅 IPv6 的 Webhook 暂不支持。平台若启用关键词，请允许 `12306`，签名密钥与平台配置保持一致。购票成功等紧急消息在飞书、企业微信和钉钉尝试群内 @所有人，实际提醒效果由平台和群权限决定。
 
 设计参考 [AstrBot 的 Platform 抽象](https://github.com/AstrBotDevs/AstrBot/blob/master/astrbot/core/platform/platform.py) 中的通道分离思路。本项目独立实现 TypeScript 发送适配器，没有引入 AstrBot、模型、LLM 或插件运行时。
 
@@ -97,6 +143,6 @@ npm run test:features
 node --import tsx server/src/__test__/ui-fixture.ts
 ```
 
-日期引擎测试可能读取公开节假日源；新增回归与功能测试使用独立临时数据库和模拟通知响应。测试范围见 [TESTING.md](TESTING.md)。
+自动回归测试使用固定日历、独立临时数据库和模拟通知 / 订单响应；桌面冒烟测试也使用隔离数据，不执行真实购票或取消订单。测试范围见 [TESTING.md](TESTING.md)。
 
 请遵守 12306 的使用规则；自动化不会付款，支付与订单确认仍由用户在 12306 完成。

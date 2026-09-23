@@ -71,7 +71,7 @@ npm --prefix desktop run bundle:macos
 
 面向内测用户的入口是双击 `打不开时点这里.command`：先用 `macos-adhoc-sign.sh` 由内到外签名应用、Helper、框架和 Chromium，再用 `macos-quarantine.sh` 备份并移除本应用的隔离标记，成功后自动打开应用。未修改全局 Gatekeeper / SIP，不使用 sudo，不覆盖证书签名版本。`恢复隔离标记.command` 仅恢复原文件标记；Ad-hoc 签名和标记移除均不自动过期，恢复原始签名需从原 DMG 重新安装。脚本测试仅操作临时模拟应用或打包应用副本，不改变本机已安装应用的安全属性。
 
-Smoke 测试使用一次性目录，验证桌面后台无 TCP 监听、私有 IPC、自定义协议页面、请求和日志导出、SQLite、内置 Chromium 启动及退出；不访问 12306、不发送通知、不注册启动项、不使用真实数据。开发版的开机启动开关禁用，避免注册 Electron 开发工具路径。
+Smoke 测试使用一次性目录，验证桌面后台无 TCP 监听、私有 IPC、自定义协议页面、JSON / 无参数 POST（含同步乘车人接口）、日志导出、SQLite、内置 Chromium 启动及退出；不访问 12306、不发送通知、不注册启动项、不使用真实数据。开发版的开机启动开关禁用，避免注册 Electron 开发工具路径。
 
 ## 自动构建与分发
 
