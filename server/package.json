@@ -18,7 +18,7 @@
     "@fastify/static": "^10.1.4",
     "@fastify/websocket": "^11.0.2",
     "bcryptjs": "^2.4.3",
-    "better-sqlite3": "^11.8.1",
+    "better-sqlite3": "13.0.3",
     "fastify": "^5.2.1",
     "jsonwebtoken": "^9.0.2",
     "nanoid": "^5.0.9",

@@ -61,7 +61,7 @@ npx playwright install chromium
 
 访问 `http://127.0.0.1:7788`。默认是本地单用户模式，无需管理台密码；点击顶栏「连接 12306」，使用 12306 APP 扫码。登录后点击账号菜单可检查连接、同步乘车人或断开账号。
 
-`./start.sh -d` 后台启动，`./start.sh stop` 停止，`./start.sh restart` 后台重启。修改代码后执行 `./start.sh build` 再重启。需要与本机 `better-sqlite3` ABI 匹配的 Node.js，建议使用 Node 22 或更新版本。
+`./start.sh -d` 后台启动，`./start.sh stop` 停止，`./start.sh restart` 后台重启。修改代码后执行 `./start.sh build` 再重启。需要 Node.js 22.12 或更新版本；CI 使用 Node 24。服务端与桌面端统一使用 `better-sqlite3` 13.0.3，避免旧版原生模块在 Node 24 下崩溃。
 
 ## 可选管理员模式
 
