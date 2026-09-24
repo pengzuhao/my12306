@@ -50,16 +50,16 @@ defineProps<{ editor: Record<string, any>; detail: Record<string, any> }>();
           <el-radio-button value="list">列表</el-radio-button>
         </el-radio-group>
         <PlanScheduleCalendar v-if="detail.detailView === 'calendar' && detail.detailRows.length > 0" :rows="detail.detailRows" :status="detail.detailStatus" :editable="detail.canSkipDate" :busy="detail.skippingDate" :cancelable="detail.canCancelDate" @skip="detail.toggleSkipDate" @cancel="detail.cancelAndSkipDate" />
-        <el-table v-if="detail.detailView === 'list'" v-loading="detail.detailLoading" :data="detail.detailRows" border size="small" max-height="520">
-          <el-table-column label="乘车日期" prop="travelDate" width="110" />
-          <el-table-column label="开售情况" width="150">
+        <el-table v-if="detail.detailView === 'list'" class="stretch-table" v-loading="detail.detailLoading" :data="detail.detailRows" border size="small" max-height="520">
+          <el-table-column label="乘车日期" prop="travelDate" min-width="110" />
+          <el-table-column label="开售情况" min-width="150" class-name="wrap-col">
             <template #default="{ row }">
               <div class="mono" style="font-size: 12px">
                 {{ saleLabel(row, detail.detailNow) }}
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="购票状态" width="100">
+          <el-table-column label="购票状态" min-width="100">
             <template #default="{ row }">
               <el-tag
                 :type="(detail.taskStatusType[row.task?.status] ?? 'info') as 'primary' | 'warning' | 'success' | 'danger' | 'info'"
@@ -69,7 +69,7 @@ defineProps<{ editor: Record<string, any>; detail: Record<string, any> }>();
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="结果" min-width="120">
+          <el-table-column label="结果" min-width="180" class-name="wrap-col">
             <template #default="{ row }">
               <div v-if="row.task?.status === 'success' && row.task.result" class="mono" style="color: #67c23a">
                 <div>{{ row.task.result.trainCode }} · {{ row.task.result.seatInfoSource ? row.task.result.seatInfo : '席别待核实' }}<span v-if="row.task.result.seatInfoSource === 'submitted'">（下单席别）</span></div>
@@ -90,7 +90,7 @@ defineProps<{ editor: Record<string, any>; detail: Record<string, any> }>();
               <div v-else style="color: #c0c4cc; font-size: 12px">—</div>
             </template>
           </el-table-column>
-          <el-table-column label="安排" width="135" fixed="right">
+          <el-table-column label="安排" min-width="148">
             <template #default="{ row }">
               <el-button v-if="detail.canSkipDate(row)" link type="primary" size="small" :loading="detail.skippingDate" @click="detail.toggleSkipDate(row)">{{ row.manuallySkipped ? '恢复购票' : '跳过' }}</el-button>
               <el-button v-else-if="detail.canCancelDate(row)" link type="danger" size="small" :loading="detail.skippingDate" @click="detail.cancelAndSkipDate(row)">取消订单并跳过</el-button>
@@ -497,6 +497,9 @@ defineProps<{ editor: Record<string, any>; detail: Record<string, any> }>();
 .train-panel-date { color: #909399; font-size: 12px; }
 .train-panel-empty { padding: 40px 12px; text-align: center; font-size: 13px; color: #909399; }
 .train-results { min-height: 0; max-height: 60dvh; overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid #ebeef5; }
+.stretch-table { width: 100%; }
+.stretch-table :deep(table) { min-width: 720px; }
+.stretch-table :deep(.wrap-col .cell) { white-space: normal; text-overflow: clip; overflow: visible; line-height: 1.45; }
 .train-result { padding: 8px 10px; border-bottom: 1px solid #ebeef5; line-height: 1.5; }
 .train-result-selected { background: #f0f7ff; }
 .train-result-header { display: flex; align-items: center; gap: 20px; }
