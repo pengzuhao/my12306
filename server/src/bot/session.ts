@@ -19,6 +19,8 @@ import { notifySessionInvalid } from '../notify/feishu.js';
 import { QrAttempt, runQrLogin, type QrSnapshot } from './qr-login.js';
 import type { SessionState } from '../types.js';
 
+import { inspectSession, confirmedInvalid } from './session-check.js';
+import { withUserLock } from './user-lock.js';
 const logger = new Logger('session');
 
 /** userId → 活跃浏览器上下文 */
@@ -72,6 +74,7 @@ export async function getContext(userId: string): Promise<BrowserContext> {
 /** 服务重启时保存并关闭浏览器，不把已登录账户改成退出状态。 */
 export async function shutdownSessions(): Promise<void> {
   stopKeepalive();
+  await keepaliveRun?.catch(() => undefined);
   for (const userId of qrChallenges.keys()) cancelQrLogin(userId);
   await Promise.allSettled(openingContexts.values());
   await Promise.allSettled([...contexts.entries()].map(async ([userId, ctx]) => {
@@ -100,28 +103,9 @@ export async function closeSession(userId: string): Promise<void> {
  * 旧实现用 GET 导航且只看 res.ok()，未登录时也会误判为已登录，导致保活形同虚设。
  */
 export async function checkLoggedIn(context: BrowserContext): Promise<boolean> {
-  const page = await context.newPage();
-  try {
-    // 先做 UAM 预热：访问确认页触发 uamtk + uamauthclient 单点登录链。
-    // 12306 的 checkUser 依赖 UAM 会话，不做预热会误报 flag:false（会话实际仍有效）。
-    await page.goto(URLS.CONFIRM_INIT_DC, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => undefined);
-    await page.waitForTimeout(1500).catch(() => undefined);
-    const raw = await page.evaluate(async (u: string) => {
-      try {
-        const res = await fetch(u, { method: 'POST', credentials: 'include' });
-        return { ok: res.ok, status: res.status, body: await res.text() };
-      } catch (e) {
-        return { ok: false, status: 0, body: String(e) };
-      }
-    }, URLS.CHECK_USER);
-    if (!raw.ok) return false;
-    const data = JSON.parse(raw.body) as { data?: { flag?: boolean }; messages?: string[] };
-    return data?.data?.flag === true;
-  } catch {
-    return false;
-  } finally {
-    await page.close().catch(() => undefined);
-  }
+  const check = await inspectSession(context);
+  if (check.status === 'unknown') throw new Error(check.reason);
+  return check.status === 'active';
 }
 
 /** 会话状态快照 */
@@ -297,42 +281,60 @@ async function trySlider(page: Page): Promise<void> {
   await page.waitForTimeout(600);
 }
 
-/** 保活检查器：周期性验证会话，失活时飞书告警（提醒用户重新登录） */
+/** 失效账号仍参与检查，允许恢复 UAM 会话；主动退出的账号不参与。 */
 let keepaliveTimer: NodeJS.Timeout | null = null;
+let keepaliveRun: Promise<void> | null = null;
+const invalidChecks = new Map<string, number>();
 
-export function startKeepalive(intervalMs = 10 * 60 * 1000): void {
-  if (keepaliveTimer) return;
-  keepaliveTimer = setInterval(async () => {
-    // 遍历所有"活跃"账号检查（登录态保存在浏览器会话中，不保存密码）
+export function runKeepalive(): Promise<void> {
+  if (keepaliveRun) return keepaliveRun;
+  keepaliveRun = (async () => {
     const { getDb } = await import('../db/index.js');
-    const rows = getDb().prepare("SELECT user_id FROM railway_accounts WHERE status = 'active'").all() as Array<{ user_id: string }>;
-    for (const { user_id } of rows) {
-      if (!userCanRun(user_id)) continue;
-      const ctx = contexts.get(user_id);
-      if (!ctx) continue;
-      try {
-        const ok = await checkLoggedIn(ctx);
-        RailwayAccountRepo.touchCheck(user_id);
-        if (ok) {
-          // 检查通过说明登录态有效，顺手落盘保持新鲜
-          await saveStorageState(ctx, user_id);
-        } else {
-          logger.warn('会话失活，通过通知通道提醒用户重新登录', { user: user_id });
-          RailwayAccountRepo.updateStatus(user_id, 'invalid', '会话过期或被踢下线');
-          wsHub.broadcastToUser(user_id, { type: 'session', payload: getSessionState(user_id) });
-          await notifySessionInvalid(user_id, '会话过期或在其他设备登录，请重新扫码登录');
-        }
-      } catch (e) {
-        logger.warn('保活检查失败', { user: user_id, error: e });
-      }
+    const rows = getDb().prepare("SELECT user_id FROM railway_accounts WHERE status IN ('active', 'invalid')").all() as Array<{ user_id: string }>;
+    for (const { user_id: userId } of rows) {
+      if (!userCanRun(userId)) continue;
+      await withUserLock(userId, async () => {
+        const before = RailwayAccountRepo.get(userId);
+        if (!before || !['active', 'invalid'].includes(before.status) || qrChallenges.get(userId) && !finishedQrAttempts.has(qrChallenges.get(userId)!)) return;
+        try {
+          const ctx = await getContext(userId); // 重启后也恢复账号，不再跳过没有内存上下文的账号
+          const check = await inspectSession(ctx);
+          const after = RailwayAccountRepo.get(userId);
+          if (!after || after.status !== before.status || after.lastLoginAt !== before.lastLoginAt || (qrChallenges.get(userId) && !finishedQrAttempts.has(qrChallenges.get(userId)!))) return;
+          RailwayAccountRepo.touchCheck(userId);
+          const failures = confirmedInvalid(invalidChecks.get(userId) ?? 0, check);
+          invalidChecks.set(userId, failures);
+          if (check.status === 'active') {
+            if (before.status !== 'active') {
+              RailwayAccountRepo.updateStatus(userId, 'active');
+              logger.info('会话检查通过，恢复连接', { userId });
+            }
+            await saveStorageState(ctx, userId);
+          } else if (check.status === 'invalid' && failures >= 2 && before.status === 'active') {
+            RailwayAccountRepo.updateStatus(userId, 'invalid', check.reason);
+            logger.warn('连续两次确认会话失效，提醒重新扫码', { userId, reason: check.reason });
+            await notifySessionInvalid(userId, '12306 连续两次确认会话失效，请重新扫码登录');
+          } else {
+            logger.warn('会话检查未通过，将继续复查', { userId, result: check.status, reason: check.reason, failures });
+          }
+          wsHub.broadcastToUser(userId, { type: 'session', payload: getSessionState(userId) });
+        } catch (error) { invalidChecks.delete(userId); logger.warn('保活检查异常，将继续复查', { userId, error: error instanceof Error ? error.message : String(error) }); }
+      });
     }
-  }, intervalMs);
+  })().finally(() => { keepaliveRun = null; });
+  return keepaliveRun;
+}
+
+export function startKeepalive(intervalMs = 5 * 60 * 1000): void {
+  if (keepaliveTimer) return;
+  const run = () => void runKeepalive().catch(error => logger.warn('保活循环异常', { error: String(error) }));
+  keepaliveTimer = setInterval(run, intervalMs);
+  run();
   logger.info('会话保活已启动', { intervalMin: intervalMs / 60000 });
 }
 
 export function stopKeepalive(): void {
-  if (keepaliveTimer) {
-    clearInterval(keepaliveTimer);
-    keepaliveTimer = null;
-  }
+  if (keepaliveTimer) clearInterval(keepaliveTimer);
+  keepaliveTimer = null;
+  invalidChecks.clear();
 }

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, dialog, utilityProcess, session, shell, protocol } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, dialog, utilityProcess, session, shell, protocol, powerMonitor } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { ORIGIN, isAppUrl, createBackendClient, createProtocolHandler } = require('./transport.cjs');
@@ -98,6 +98,11 @@ else {
     if (fs.existsSync(logPath) && fs.statSync(logPath).size > 5 * 1024 * 1024) fs.renameSync(logPath, logPath + '.old');
     logStream = fs.createWriteStream(logPath, { flags: 'a', mode: 0o600 });
     origin = await startBackend();
+    powerMonitor.on('suspend', () => appendLog('电脑休眠，后台定时检查将暂停\n'));
+    powerMonitor.on('resume', () => {
+      appendLog('电脑唤醒，立即重新检查 12306 会话\n');
+      if (backend && !exited && !quitting) backend.postMessage({ type: 'resume' });
+    });
     const webSession = session.fromPartition('persist:my12306');
     webSession.protocol.handle('my12306', createProtocolHandler(requestBackend));
     if (process.env.MY12306_DESKTOP_SMOKE === '1') {

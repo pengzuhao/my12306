@@ -31,7 +31,7 @@ import { sessionRoutes } from './routes/session.routes.js';
 import { orderRoutes } from './routes/order.routes.js';
 import { miscRoutes } from './routes/misc.routes.js';
 import { startScheduler, stopScheduler } from './scheduler/scheduler.js';
-import { startKeepalive, stopKeepalive, shutdownSessions } from './bot/session.js';
+import { startKeepalive, stopKeepalive, shutdownSessions, runKeepalive } from './bot/session.js';
 import { cleanupBrowser } from './bot/browser.js';
 import { ensureYears } from './calendar/holidays.js';
 
@@ -109,7 +109,8 @@ async function bootstrap(): Promise<void> {
   process.on('SIGTERM', shutdown);
 
   const parentPort = (process as typeof process & { parentPort?: DesktopPort }).parentPort;
-  parentPort?.on('message', event => { if (event.data?.type === 'shutdown') void shutdown(); });
+  parentPort?.on('message', event => { if (event.data?.type === 'shutdown') void shutdown();
+    if (event.data?.type === 'resume') void runKeepalive().catch(error => logger.warn('唤醒后会话检查失败', { error: String(error) })); });
   const desktopIpc = process.env.MY12306_TRANSPORT === 'ipc';
   let address: string | undefined;
   if (desktopIpc) {

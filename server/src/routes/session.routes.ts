@@ -78,10 +78,7 @@ export const sessionRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts
     const user = currentUser(request);
     const ctx = await getContext(user.id).catch(() => null);
     if (!ctx) {
-      // 浏览器起不来也必须把状态标成失活，否则前端一直显示"已连接"
-      RailwayAccountRepo.updateStatus(user.id, 'invalid', '浏览器未启动');
-      wsHub.broadcastToUser(user.id, { type: 'session', payload: getSessionState(user.id) });
-      return { loggedIn: false, state: getSessionState(user.id) };
+      throw new Error('暂时无法启动登录检查，请稍后重试');
     }
     const ok = await checkLoggedIn(ctx);
     if (ok) {
