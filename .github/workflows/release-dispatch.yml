@@ -15,23 +15,34 @@ on:
 permissions:
   contents: write
 jobs:
+  select:
+    runs-on: ubuntu-24.04
+    outputs:
+      targets: ${{ steps.pick.outputs.targets }}
+    steps:
+      - id: pick
+        env:
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          set -euo pipefail
+          mac='{"id":"mac-apple","os":"macos-15","args":"--mac dmg --arm64"}'
+          amd='{"id":"linux-amd","os":"ubuntu-24.04","args":"--linux --x64"}'
+          arm='{"id":"linux-arm","os":"ubuntu-24.04-arm","args":"--linux --arm64"}'
+          case "$PLATFORM" in
+            all) echo "targets=[$mac,$amd,$arm]" >> "$GITHUB_OUTPUT" ;;
+            mac-apple) echo "targets=[$mac]" >> "$GITHUB_OUTPUT" ;;
+            linux-amd) echo "targets=[$amd]" >> "$GITHUB_OUTPUT" ;;
+            linux-arm) echo "targets=[$arm]" >> "$GITHUB_OUTPUT" ;;
+            *) echo "未知平台：$PLATFORM" >&2; exit 1 ;;
+          esac
   build:
     name: ${{ matrix.id }}
-    if: inputs.platform == 'all' || inputs.platform == matrix.id
+    needs: select
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - id: mac-apple
-            os: macos-15
-            args: --mac dmg --arm64
-          - id: linux-amd
-            os: ubuntu-24.04
-            args: --linux --x64
-          - id: linux-arm
-            os: ubuntu-24.04-arm
-            args: --linux --arm64
+        include: ${{ fromJSON(needs.select.outputs.targets) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
