@@ -67,6 +67,7 @@ const planSchema = z.object({
   seatTypes: z.array(z.enum(['ZE', 'ZY', 'TZ', 'GR', 'RW', 'YW', 'RZ', 'YZ'])).min(1, '请至少选择一个席别'),
   allowNoSeat: z.boolean().default(false),
   passengerIds: z.array(z.string()).min(1, '请至少选择一名乘车人'),
+  dependsOnPlanId: z.string().min(1).nullable().optional(),
 }).superRefine((body, ctx) => {
   validateDates(body, ctx);
   if (body.fromStation === body.toStation) ctx.addIssue({ code: 'custom', path: ['toStation'], message: '出发站和到达站不能相同' });
@@ -113,6 +114,11 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
     }
     const passengerIds = new Set(PassengersRepo.list(user.id).map((p) => p.id));
     if (body.passengerIds.some((id) => !passengerIds.has(id))) return reply.code(400).send({ error: '乘车人不存在，请重新同步并选择' });
+    const dependsOnPlanId = body.dependsOnPlanId !== undefined ? body.dependsOnPlanId : (existing?.dependsOnPlanId ?? null);
+    if (dependsOnPlanId) {
+      const prev = PlansRepo.get(dependsOnPlanId);
+      if (!prev || prev.userId !== user.id || prev.status === 'deleted') return reply.code(400).send({ error: '前一程计划不存在' });
+    }
     const id = body.id ?? nanoid();
     const plan = PlansRepo.save({
       id,
@@ -137,6 +143,7 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
       seatTypes: body.seatTypes,
       allowNoSeat: body.allowNoSeat,
       passengerIds: body.passengerIds,
+      dependsOnPlanId,
     });
     logger.info('保存计划', { planId: plan.id, name: plan.name, by: user.username });
     return plan;
@@ -374,10 +381,13 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
     }
     try {
       const { getContext } = await import('../bot/session.js');
-      const { queryTrains } = await import('../bot/tickets.js');
+      const { queryTrains, queryTransfers } = await import('../bot/tickets.js');
       const ctx = await getContext(user.id);
-      const trains = await queryTrains(ctx, { trainDate: date, fromStation: from, toStation: to });
+      const query = { trainDate: date, fromStation: from, toStation: to };
+      const trains = await queryTrains(ctx, query);
+      const schemes = await queryTransfers(ctx, query);
       return {
+        schemes,
         trains: trains.map((t) => ({
           trainCode: t.trainCode,
           fromStation: t.fromStation,

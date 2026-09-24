@@ -2,13 +2,16 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { useRouter } from 'vue-router';
-import { metaApi, planApi, type TrainOption } from '../api';
+import { metaApi, planApi, type TrainOption, type TravelScheme } from '../api';
 
 import { sessionState } from '../store/session';
 import { todayCn, isPastDate } from '../utils/time';
 import { trainSearchErrorMessage } from '../utils/train-query-error';
 
+defineOptions({ name: 'TrainsView' });
+
 const router = useRouter();
+const TRANSFER_DRAFT_KEY = 'my12306-transfer-draft';
 
 /** 查询表单 */
 const form = reactive({
@@ -19,6 +22,7 @@ const form = reactive({
 
 const loading = ref(false);
 const trains = ref<TrainOption[]>([]);
+const schemes = ref<TravelScheme[]>([]);
 /** 12306 是否已登录（未登录时给引导） */
 const loggedIn = computed(() => !!sessionState.value.loggedIn);
 const searched = ref(false);
@@ -27,6 +31,7 @@ let searchVersion = 0;
 watch(() => [form.from, form.to, form.date], () => {
   searchVersion++;
   trains.value = [];
+  schemes.value = [];
   searched.value = false;
   searchError.value = '';
   loading.value = false;
@@ -79,18 +84,21 @@ async function search(): Promise<void> {
   searchError.value = '';
   searched.value = true;
   trains.value = [];
+  schemes.value = [];
   try {
     const res = await metaApi.trains(form.from, form.to, form.date);
     if (version !== searchVersion) return;
     trains.value = res.trains;
-    if (!res.trains.length) {
+    schemes.value = res.schemes ?? [];
+    if (!res.trains.length && !schemes.value.length) {
       ElMessage.warning('该日期/区间暂无可查车次（可能未到预售期或无直达车）');
     } else {
-      ElMessage.success(`查到 ${res.trains.length} 趟车次`);
+      ElMessage.success(`查到 ${res.trains.length} 趟直达，${schemes.value.length} 个换乘/接续方案`);
     }
   } catch (e) {
     if (version !== searchVersion) return;
     trains.value = [];
+    schemes.value = [];
     searchError.value = trainSearchErrorMessage(e);
   } finally {
     if (version === searchVersion) loading.value = false;
@@ -110,6 +118,37 @@ function newPlanWithTrain(t: TrainOption): void {
     path: '/plans',
     query: { from: t.fromStation, to: t.toStation, date: form.date, train: t.trainCode },
   });
+}
+
+function nextDay(date: string): string {
+  const d = new Date(`${date}T12:00:00`);
+  d.setDate(d.getDate() + 1);
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+/** 换乘的每一程都是独立购票计划：站点不同，不能塞进同一个出发到达站。 */
+function newPlanWithScheme(scheme: TravelScheme): void {
+  if (!scheme.legs.length || !form.date) return;
+  let date = form.date;
+  let previous = '';
+  const legs = scheme.legs.map((leg) => {
+    const explicit = /^\d{4}-\d{2}-\d{2}$/.test(leg.date ?? '') ? leg.date! : '';
+    const depart = leg.departTime || '00:00';
+    if (explicit) date = explicit;
+    else if (previous && depart < previous) date = nextDay(date);
+    previous = leg.arriveTime || depart;
+    return {
+      trainCode: leg.trainCode,
+      fromStation: leg.fromStation,
+      toStation: leg.toStation,
+      date,
+      seatTypes: leg.seatTypes ?? [],
+    };
+  });
+  sessionStorage.setItem(TRANSFER_DRAFT_KEY, JSON.stringify(legs));
+  router.push({ path: '/plans', query: { transfer: '1' } });
 }
 
 onMounted(async () => {
@@ -206,7 +245,33 @@ onMounted(async () => {
         </template>
       </el-table-column>
     </el-table>
-    <el-empty v-else-if="!loading" :description="searchError ? '查询未完成，请重试' : searched ? '该日期或区间暂无可查车次，请调整条件' : '输入站点和日期后点「查询车次」'" />
+    <p v-if="schemes.length" class="sub-hint">换乘 / 同车接续 / 补票 · {{ schemes.length }} 个方案。一次会为每一程各建一个购票计划。</p>
+    <el-table v-if="schemes.length" :data="schemes" border style="margin-top: 8px">
+      <el-table-column label="方案" prop="label" width="100" />
+      <el-table-column label="行程" min-width="280">
+        <template #default="{ row }">
+          <div v-for="(leg, i) in row.legs" :key="i">{{ leg.trainCode }} {{ leg.fromStation }} → {{ leg.toStation }} {{ leg.departTime }}–{{ leg.arriveTime }}</div>
+          <div v-if="row.middleStation" class="sub-hint">经 {{ row.middleStation }}<span v-if="row.waitTime"> · 等候 {{ row.waitTime }}</span></div>
+        </template>
+      </el-table-column>
+      <el-table-column label="发车 → 到达" width="140">
+        <template #default="{ row }"><span class="mono">{{ row.departTime }} → {{ row.arriveTime }}</span></template>
+      </el-table-column>
+      <el-table-column label="总历时" prop="duration" width="90" />
+      <el-table-column label="余票" min-width="200">
+        <template #default="{ row }">
+          <div v-for="(leg, i) in row.legs" :key="i" class="seat-list">
+            <span v-for="(count, name) in leg.seats" :key="name" class="seat-chip" :style="{ color: seatColor(count) }">{{ name }} {{ count }}</span>
+          </div>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="140" fixed="right">
+        <template #default="{ row }">
+          <el-button size="small" type="primary" plain @click="newPlanWithScheme(row)">加入全部行程</el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+    <el-empty v-else-if="!loading && !trains.length" :description="searchError ? '查询未完成，请重试' : searched ? '该日期或区间暂无可查车次，请调整条件' : '输入站点和日期后点「查询车次」'" />
   </el-card>
 </template>
 

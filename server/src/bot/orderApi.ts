@@ -39,6 +39,10 @@ export interface RawTicket {
   seat_type_name?: string;
   coach_name?: string;
   seat_name?: string;
+  /** 退票定位：批次、车厢、席位。12306 退票接口按这三项加订单号提交。 */
+  batch_no?: string;
+  coach_no?: string;
+  seat_no?: string;
   /** 未完成订单的票价（元）；已完成订单不返回此字段 */
   price?: number | string;
   /** 已完成订单的票价（分），如 13600 = ¥136.00 */
@@ -134,9 +138,18 @@ export async function fetchIncompleteOrders(page: Page, strict = false): Promise
   return data.data?.orderDBList ?? [];
 }
 
-/** 日期格式化为 12306 订单查询用的 YYYY-MM-DD */
-function fmtDay(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+/** 日期格式化为 12306 订单查询用的 YYYY-MM-DD（北京时间，不跟进程时区） */
+export function fmtDay(d: Date): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(d);
+  const y = parts.find((p) => p.type === 'year')?.value;
+  const m = parts.find((p) => p.type === 'month')?.value;
+  const day = parts.find((p) => p.type === 'day')?.value;
+  return `${y}-${m}-${day}`;
 }
 
 /**

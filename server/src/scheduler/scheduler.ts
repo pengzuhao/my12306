@@ -238,75 +238,101 @@ async function triggerDueTasks(): Promise<void> {
 async function reconcileBeforeSale(): Promise<void> {
   const todayStr = today();
   const plans = PlansRepo.listActive();
+  const byUser = new Map<string, Plan[]>();
   for (const plan of plans) {
     const acc = RailwayAccountRepo.get(plan.userId);
     if (!acc || acc.status !== 'active') continue;
-    // 用户级节流：10 分钟内已对账过则跳过（真到起售那一刻若有任务，triggerDueTasks 会再触发一轮）
-    const last = lastReconcileAt.get(plan.userId) ?? 0;
-    if (Date.now() - last < RECONCILE_MIN_INTERVAL_MS) continue;
     const dates = PlanDatesRepo.list(plan.id).filter((d) => d.status === 'done' && d.travelDate >= todayStr);
     if (!dates.length) continue;
-    lastReconcileAt.set(plan.userId, Date.now());
-    // 对账也走用户锁：不能和正在执行的购票流程共用同一会话，否则互相踩踏
-    await withUserLock(plan.userId, async () => {
+    // 用户级节流：10 分钟内已对账过则整户跳过。查询成功后才记时间，失败的下一轮还能再查。
+    const last = lastReconcileAt.get(plan.userId) ?? 0;
+    if (Date.now() - last < RECONCILE_MIN_INTERVAL_MS) continue;
+    const group = byUser.get(plan.userId) ?? [];
+    group.push(plan);
+    byUser.set(plan.userId, group);
+  }
+  for (const [userId, userPlans] of byUser) {
+    // 同一账号只查一次订单，再套到该账号的每个计划上
+    await withUserLock(userId, async () => {
       let ctx;
       try {
-        ctx = await getContext(plan.userId);
+        ctx = await getContext(userId);
       } catch (e) {
-        logger.warn('对账：浏览器上下文获取失败', { userId: plan.userId, plan: plan.name, error: e });
+        logger.warn('对账：浏览器上下文获取失败', { userId, error: e });
         return;
       }
-      // 整轮对账包一层：订单预热/查询任何一步失败（如登录态失效被重定向到登录页）
-      // 都不能让异常冒泡成 unhandled rejection 拖垮整个服务进程
       let purchased: Map<string, PurchasedTicket> | null;
       try {
         purchased = await queryPurchasedTickets(ctx);
       } catch (e) {
-        logger.warn('对账：订单查询异常', { userId: plan.userId, plan: plan.name, error: e });
+        logger.warn('对账：订单查询异常', { userId, error: e });
         return;
       }
       if (!purchased) {
-        logger.warn('对账：订单查询不完整，跳过本轮', { plan: plan.name });
+        logger.warn('对账：订单查询不完整，跳过本轮', { userId });
         return;
       }
-      for (const d of dates) {
-        if (PlanDateSkipsRepo.has(plan.id, d.travelDate)) continue;
-        const hit = findByDateAndAnyCode(purchased, d.travelDate);
-        if (hit) continue; // 票还在（未支付或已支付），保持 done
-        // 回滚：票没了（未支付已超时取消），标记未完成并重置任务等待重新执行
-        PlanDatesRepo.markPending(plan.id, d.travelDate);
-        const tasks = TasksRepo.findByPlanDate(plan.id, d.travelDate);
-        for (const t of tasks) {
-          if (t.status === 'success') {
-            // 保留 saleAt（起售时刻不变）；重置为 queried 后触发器会重新执行
-            // 同时清掉可能挂着的支付到期闹钟（闹钟里会校验状态，但清掉更省一次空查）
-            clearPayDeadlineTimer(t.id);
-            TasksRepo.update(t.id, { status: 'queried', result: null, error: '对账回滚：未支付订单已失效，重新执行', finishedAt: null });
-            logger.info('对账回滚：重新等待执行', { taskId: t.id, plan: plan.name, travelDate: d.travelDate, saleAt: t.saleAt });
+      lastReconcileAt.set(userId, Date.now());
+      for (const plan of userPlans) {
+        const dates = PlanDatesRepo.list(plan.id).filter((d) => d.status === 'done' && d.travelDate >= todayStr);
+        for (const d of dates) {
+          if (PlanDateSkipsRepo.has(plan.id, d.travelDate)) continue;
+          if (planStillHolds(purchased, d.travelDate, plan.trainNumbers, plan.trainSegments)) continue;
+          PlanDatesRepo.markPending(plan.id, d.travelDate);
+          const tasks = TasksRepo.findByPlanDate(plan.id, d.travelDate);
+          for (const t of tasks) {
+            if (t.status === 'success') {
+              clearPayDeadlineTimer(t.id);
+              TasksRepo.update(t.id, { status: 'queried', result: null, error: '对账回滚：未支付订单已失效，重新执行', finishedAt: null });
+              logger.info('对账回滚：重新等待执行', { taskId: t.id, plan: plan.name, travelDate: d.travelDate, saleAt: t.saleAt });
+            }
           }
+          logger.info('对账回滚：当日车票已失效', { userId, plan: plan.name, travelDate: d.travelDate });
         }
-        logger.info('对账回滚：当日车票已失效', { userId: plan.userId, plan: plan.name, travelDate: d.travelDate });
       }
     });
   }
 }
 
-/** 已购集合里是否存在该日期的任一车次（查重/对账用，车次未指定时按日期匹配） */
-function findByDateAndAnyCode(purchased: Map<string, { orderNo: string; status: string }>, travelDate: string): boolean {
-  // 对账集合统一使用 YYYYMMDD|车次，与票面时分无关
-  const prefix = `${travelDate.replace(/\D/g, '').slice(0, 8)}|`;
+/** 已购键：日期|车次|上车站|下车站。同车接续两段车次相同，必须用车站分开。 */
+function ticketMatches(
+  key: string,
+  travelDate: string,
+  trainNumbers: string[] | null,
+  segments: Array<{ trainCode: string; fromStation: string; toStation: string }> | null | undefined,
+): boolean {
+  const [d = '', c = '', from = '', to = ''] = key.split('|');
+  if (d.slice(0, 8) !== travelDate.replace(/\D/g, '').slice(0, 8)) return false;
+  const codes = (trainNumbers ?? []).map((code) => code.replace(/\s/g, '').toUpperCase()).filter(Boolean);
+  if (codes.length && !codes.includes(c)) return false;
+  const segs = segments ?? [];
+  if (segs.length && !segs.some((s) => s.trainCode.replace(/\s/g, '').toUpperCase() === c && s.fromStation === from && s.toStation === to)) return false;
+  return true;
+}
+
+/** 计划是否还握着该日这一段车票。指定了区间就只认这段，避免同车另一段被当成已买到。 */
+function planStillHolds(
+  purchased: Map<string, { orderNo: string; status: string }>,
+  travelDate: string,
+  trainNumbers: string[] | null,
+  segments?: Array<{ trainCode: string; fromStation: string; toStation: string }>,
+): boolean {
   for (const key of purchased.keys()) {
-    if (key.slice(0, prefix.length) === prefix) return true;
+    if (ticketMatches(key, travelDate, trainNumbers, segments)) return true;
   }
   return false;
 }
 
-/** 已购集合里该日期的全部车票（支付到期检查用，需知道是否已支付） */
-function entriesForDate(purchased: Map<string, PurchasedTicket>, travelDate: string): PurchasedTicket[] {
-  const prefix = `${travelDate.replace(/\D/g, '').slice(0, 8)}|`;
+/** 已购集合里该日期、且属于本计划区间的车票（支付到期检查用） */
+function entriesForDate(
+  purchased: Map<string, PurchasedTicket>,
+  travelDate: string,
+  trainNumbers: string[] | null,
+  segments?: Array<{ trainCode: string; fromStation: string; toStation: string }>,
+): PurchasedTicket[] {
   const out: PurchasedTicket[] = [];
   for (const [key, v] of purchased) {
-    if (key.slice(0, prefix.length) === prefix) out.push(v);
+    if (ticketMatches(key, travelDate, trainNumbers, segments)) out.push(v);
   }
   return out;
 }
@@ -374,7 +400,7 @@ async function onPayDeadlineReached(task: Task, plan: Plan, recheck: number): Pr
     return;
   }
 
-  const hits = entriesForDate(purchased, task.travelDate);
+  const hits = entriesForDate(purchased, task.travelDate, task.trainNumber ? [task.trainNumber] : plan.trainNumbers, plan.trainSegments);
   if (hits.length) {
     // 票还在：用户可能已支付，或 12306 还没来得及取消未支付订单
     if (hits.every((h) => h.status === 'paid')) {
@@ -442,6 +468,20 @@ function isTransientFailure(error?: string | null): boolean {
   return error.includes('未进入确认页') || error.includes('UAM') || error.includes('超时');
 }
 
+/** 换乘后一程：前一程已支付才买。前一程失败则本程取消；未支付或还没跑完则稍后重试。 */
+function earlierLegGate(plan: Plan): 'wait' | 'skip' | null {
+  if (!plan.dependsOnPlanId) return null;
+  const prev = PlansRepo.get(plan.dependsOnPlanId);
+  if (!prev || prev.status === 'deleted') return 'skip';
+  if (prev.status === 'paused' || !prev.travelDate) return 'wait';
+  const tasks = TasksRepo.findByPlanDate(prev.id, prev.travelDate);
+  const task = tasks.find((item) => item.status !== 'cancelled') ?? tasks[0];
+  if (!task) return 'wait';
+  if (task.status === 'failed' || task.status === 'skipped') return 'skip';
+  if (task.status === 'success') return task.result?.paid === false ? 'wait' : null;
+  return 'wait';
+}
+
 /** 执行单个购票任务（含退避重试） */
 async function runTask(task: Task): Promise<void> {
   if (!userCanRun(task.userId) || PlanDateSkipsRepo.has(task.planId, task.travelDate)) return;
@@ -469,6 +509,18 @@ async function runTask(task: Task): Promise<void> {
       return;
     }
     if (PlanDateSkipsRepo.has(task.planId, task.travelDate) || TasksRepo.get(task.id)?.status !== 'queried' || PlansRepo.get(plan.id)?.status !== 'active') return;
+    const gate = earlierLegGate(plan);
+    if (gate === 'skip') {
+      TasksRepo.update(task.id, { status: 'skipped', error: '前一程未买到，本程不再购买', finishedAt: new Date().toISOString() });
+      wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
+      return;
+    }
+    if (gate === 'wait') {
+      const retryAt = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+      TasksRepo.update(task.id, { status: 'queried', saleAt: retryAt, error: '等待前一程支付完成', finishedAt: null });
+      wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
+      return;
+    }
     TasksRepo.update(task.id, { status: 'queued', startedAt: null });
     wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
 

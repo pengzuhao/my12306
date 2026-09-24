@@ -21,6 +21,7 @@ import {
   type RawTicket,
 } from './orderApi.js';
 import { Logger } from '../logger.js';
+import { groupJourneys } from './journey.js';
 
 const logger = new Logger('bot');
 
@@ -48,6 +49,12 @@ export interface OrderRow {
   payLimitTime: string | null;
   /** 支付截止时间的毫秒时间戳（前端据此做「确定刷新节点」） */
   payLimitTs: number | null;
+  /** 同一换乘行程的几张票共用。单程为空。 */
+  journeyId: string | null;
+  /** 行程内第几程，从 1 开始。 */
+  legIndex: number;
+  /** 退票定位，每人一张。 */
+  refundTickets: Array<{ passenger: string; batchNo: string; coachNo: string; seatNo: string }>;
 }
 
 /**
@@ -63,14 +70,46 @@ function normDateTime(s: string | null | undefined): string {
   return h ? `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')} ${hh}:${(mi ?? '00').padStart(2, '0')}` : `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
 }
 
-/** 只接受包含日期的到达时间，不能凭时刻猜测跨日。 */
-function arrivalDateTime(ticket: RawTicket): string | null {
-  const value = normDateTime(ticket.stationTrainDTO?.arrive_time);
+/** 校验北京时间字符串，非法日期（如 2 月 30 日）返回 null。 */
+function validBeijing(value: string): string | null {
   if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(value)) return null;
   const instant = new Date(value.replace(' ', 'T') + ':00+08:00');
   if (!Number.isFinite(instant.getTime())) return null;
-  const normalized = new Date(instant.getTime() + 8 * 3600000).toISOString().slice(0,16).replace('T',' ');
+  const normalized = new Date(instant.getTime() + 8 * 3600000).toISOString().slice(0, 16).replace('T', ' ');
   return normalized === value ? value : null;
+}
+
+function nextCalendarDay(date: string): string {
+  const d = new Date(date + 'T12:00:00.000Z');
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+/** 从「HH:mm」或「日期 + 时刻」里取出钟点。 */
+function clockOf(raw: string): { hh: string; mi: string } | null {
+  const hm = /(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(raw.trim());
+  if (!hm) return null;
+  const hh = Number(hm[1]);
+  const mi = Number(hm[2]);
+  if (hh > 23 || mi > 59) return null;
+  return { hh: String(hh).padStart(2, '0'), mi: hm[2] };
+}
+
+/**
+ * 到达时间。真实到达日（不早于乘车日，含跨多日）直接采用。
+ * 12306 常把到达时刻放在 1970-01-01 上，或只给 HH:mm：丢掉占位日期，用乘车日拼时刻；早于出发则算次日。
+ */
+function arrivalDateTime(ticket: RawTicket): string | null {
+  const raw = String(ticket.stationTrainDTO?.arrive_time ?? '').trim();
+  const depart = normDateTime(ticket.start_train_date_page ?? ticket.train_date);
+  const dm = /^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2})$/.exec(depart);
+  const dated = validBeijing(normDateTime(raw));
+  if (dated && (!dm || dated.slice(0, 10) >= dm[1])) return dated;
+  const timeOnly = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.test(raw);
+  const clock = clockOf(timeOnly ? raw : (dated ?? ''));
+  if (!clock || !dm) return null;
+  const date = `${clock.hh}:${clock.mi}` < `${dm[2]}:${dm[3]}` ? nextCalendarDay(dm[1]) : dm[1];
+  return validBeijing(`${date} ${clock.hh}:${clock.mi}`);
 }
 
 /**
@@ -102,6 +141,7 @@ interface AccumOrder {
   totalPrice: number | null;
   payLimitTime: string | null;
   payLimitTs: number | null;
+  refundTickets: OrderRow['refundTickets'];
 }
 
 /** 同一订单按乘车日期、车次、区间和票面状态分组，避免串票价。 */
@@ -153,6 +193,12 @@ function ingestOrders(
         totalPrice: total,
         payLimitTime,
         payLimitTs: parseCnTimestamp(payLimitTime),
+        refundTickets: tickets.map((t) => ({
+          passenger: String(t.passenger_name ?? t.passengerDTO?.passenger_name ?? '').trim(),
+          batchNo: String(t.batch_no ?? '').trim(),
+          coachNo: String(t.coach_no ?? '').trim(),
+          seatNo: String(t.seat_no ?? '').trim(),
+        })).filter((t) => t.passenger),
       });
     }
   }
@@ -201,6 +247,9 @@ function toRow(a: AccumOrder): OrderRow {
     totalPrice: a.totalPrice,
     payLimitTime: a.payLimitTime,
     payLimitTs: a.payLimitTs,
+    journeyId: null,
+    legIndex: 1,
+    refundTickets: a.refundTickets,
   };
 }
 
@@ -209,7 +258,7 @@ export function normalizeOrders(completed: RawOrder[], incomplete: RawOrder[]): 
   const map = new Map<string, AccumOrder>();
   ingestOrders(completed, map, false);
   ingestOrders(incomplete, map, true);
-  return [...map.values()].map(toRow);
+  return groupJourneys([...map.values()].map(toRow));
 }
 
 /**
@@ -239,18 +288,22 @@ export async function queryOrders(context: BrowserContext): Promise<OrderRow[]> 
     }
 
     // 2) 未完成订单覆盖入表（待支付/待出票）——POST，列表在 orderDBList
+    let incompleteOk = false;
     try {
-      const list = await fetchIncompleteOrders(page);
+      // 空响应不能当成「没有待支付」。未确认就抛错，让页面保留旧数据，而不是把待支付藏掉。
+      const list = await fetchIncompleteOrders(page, true);
       ingestOrders(list, map, true);
       logger.info('未完成订单入表', { count: list.length });
+      incompleteOk = true;
       anyOk = true;
     } catch (e) {
       logger.warn('已购票：未完成订单查询失败', e instanceof Error ? e.message : String(e));
     }
 
     if (!anyOk) throw new Error('12306 订单查询失败（未完成与已完成接口均无响应，可能登录已失效）');
+    if (!incompleteOk) throw new Error('未完成订单查询未确认');
 
-    const rows = [...map.values()].map(toRow);
+    const rows = groupJourneys([...map.values()].map(toRow));
     rows.sort((a, b) => {
       // 待支付置顶，按支付截止时间升序
       if (a.status === 'unpaid' && b.status !== 'unpaid') return -1;

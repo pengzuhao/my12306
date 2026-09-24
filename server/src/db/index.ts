@@ -43,6 +43,7 @@ export function applySchema(): void {
   addPlansOffsetDaysColumn();
   addPlansAllowNoSeatColumn();
   addPlansSeatTypesColumn();
+  addPlansDependsOnColumn();
   if (!(db.prepare('PRAGMA table_info(plans)').all() as Array<{ name: string }>).some(c => c.name === 'train_segments')) db.exec("ALTER TABLE plans ADD COLUMN train_segments TEXT NOT NULL DEFAULT '[]'");
   if (!(db.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>).some(c => c.name === 'disabled')) db.exec('ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0');
   log('数据库 schema 已应用');
@@ -151,6 +152,14 @@ function addPlansAllowNoSeatColumn(): void {
  * 用户要求计划里必须选择席别（二等座/一等座等），订票时严格按所选席别匹配。
  * 老计划没填过席别，默认给 ['ZE']（二等座，最常用），用户可自行编辑修改。
  */
+function addPlansDependsOnColumn(): void {
+  const db = getDb();
+  const cols = db.prepare('PRAGMA table_info(plans)').all() as Array<{ name: string }>;
+  if (cols.some((c) => c.name === 'depends_on_plan_id')) return;
+  db.exec('ALTER TABLE plans ADD COLUMN depends_on_plan_id TEXT');
+  log('已为 plans 增加 depends_on_plan_id 列（换乘后一程依赖前一程）');
+}
+
 function addPlansSeatTypesColumn(): void {
   const db = getDb();
   const cols = db.prepare('PRAGMA table_info(plans)').all() as Array<{ name: string }>;

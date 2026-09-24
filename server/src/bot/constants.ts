@@ -13,10 +13,14 @@ export const URLS = {
   CAPTCHA_IMAGE: 'https://kyfw.12306.cn/passport/captcha/captcha-image64',
   CAPTCHA_CHECK: 'https://kyfw.12306.cn/passport/captcha/captcha-check',
   INDEX: 'https://kyfw.12306.cn/otn/index/init',
-  MY12306: 'https://kyfw.12306.cn/otn/profile/initMy12306Api',
+  MY12306: 'https://kyfw.12306.cn/otn/index/initMy12306Api',
+  LOGIN_CONF: 'https://kyfw.12306.cn/otn/login/conf',
+  USER_INFO: 'https://kyfw.12306.cn/otn/modifyUser/initQueryUserInfoApi',
   CHECK_USER: 'https://kyfw.12306.cn/otn/login/checkUser',
   LEFT_TICKET_INIT: 'https://kyfw.12306.cn/otn/leftTicket/init',
   LEFT_TICKET_QUERY: 'https://kyfw.12306.cn/otn/leftTicket/queryZ',
+  /** 中转换乘 / 同车接续。页面须先停在查票页，否则没有查询 cookie。 */
+  LC_QUERY: 'https://kyfw.12306.cn/lcquery/queryG',
   QUERY_SALE_TIME: 'https://kyfw.12306.cn/otn/leftTicket/querySaleTime',
   CONFIRM_INIT_DC: 'https://kyfw.12306.cn/otn/confirmPassenger/initDc',
   /** 「我的订单」查询页（已完成订单）。POST 查询时页面必须停在此 URL 上——

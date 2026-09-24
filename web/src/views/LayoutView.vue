@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import DesktopSettings from '../components/DesktopSettings.vue';
-import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
+import { computed, onMounted, onBeforeUnmount, ref, KeepAlive } from 'vue';
 import { useRouter, RouterView } from 'vue-router';
 import { WsClient, http, apiError } from '../api';
 import { multiUser, appUser, logoutApp, clearAppLogin } from '../store/auth';
@@ -122,7 +122,11 @@ onBeforeUnmount(() => { ws.value?.close(); if (qrVisible.value) void cancelLogin
         </el-menu>
       </el-aside>
       <el-main class="app-main">
-        <RouterView />
+        <RouterView v-slot="{ Component }">
+          <KeepAlive include="TrainsView">
+            <component :is="Component" />
+          </KeepAlive>
+        </RouterView>
       </el-main>
     </el-container>
   </el-container>

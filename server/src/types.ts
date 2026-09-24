@@ -78,6 +78,8 @@ export interface Plan {
    */
   allowNoSeat: boolean;
   passengerIds: string[];
+  /** 换乘后一程依赖的前一程计划。前一程未支付成功前，本计划不发起下单。 */
+  dependsOnPlanId?: string | null;
   createdAt: string;
   updatedAt: string;
 }

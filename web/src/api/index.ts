@@ -79,6 +79,8 @@ export interface PlanForm {
   /** 是否允许购买无座票（默认 false：不买站票，除非明确勾选） */
   allowNoSeat: boolean;
   passengerIds: string[];
+  /** 换乘后一程依赖的前一程计划。省略则保留原值。 */
+  dependsOnPlanId?: string | null;
 }
 
 export const planApi = {
@@ -155,10 +157,33 @@ export interface TrainOption {
   seats?: Record<string, string>;
 }
 
+export interface TravelScheme {
+  kind: 'transfer' | 'same-train' | 'supplement';
+  label: string;
+  fromStation: string;
+  middleStation: string;
+  toStation: string;
+  departTime: string;
+  arriveTime: string;
+  duration: string;
+  waitTime: string;
+  legs: Array<{
+    trainCode: string;
+    fromStation: string;
+    toStation: string;
+    departTime: string;
+    arriveTime: string;
+    duration: string;
+    date?: string;
+    seats: Record<string, string>;
+    seatTypes?: string[];
+  }>;
+}
+
 export const metaApi = {
   seatTypes: () => http.get('/meta/seat-types').then((r) => r.data as SeatTypeOption[]),
   trains: (from: string, to: string, date: string) =>
-    http.get('/trains/search', { params: { from, to, date } }).then((r) => r.data as { trains: TrainOption[] }),
+    http.get('/trains/search', { params: { from, to, date } }).then((r) => r.data as { trains: TrainOption[]; schemes?: TravelScheme[] }),
 };
 
 // ---- 任务与日志 ----
@@ -185,6 +210,23 @@ export interface OrderRow {
   payLimitTime: string | null;
   /** 支付截止时间戳（毫秒），前端据此做「确定刷新节点」 */
   payLimitTs: number | null;
+  /** 换乘几张票合成一条时共用。单程为空。 */
+  journeyId?: string | null;
+  legIndex?: number;
+  refundTickets?: Array<{ passenger: string; batchNo: string; coachNo: string; seatNo: string }>;
+}
+
+export interface ChangeOption {
+  kind: 'direct' | 'transfer' | 'same-train' | 'supplement';
+  label: string;
+  fromStation: string;
+  toStation: string;
+  departTime: string;
+  arriveTime: string;
+  duration: string;
+  trains: string[];
+  reason: string;
+  legs: Array<{ trainCode: string; fromStation: string; toStation: string; departTime: string; arriveTime: string; date: string; seatTypes: string[] }>;
 }
 
 export interface OrdersResponse {
@@ -197,6 +239,10 @@ export interface OrdersResponse {
 
 export const ordersApi = {
   list: () => http.get('/orders').then((r) => r.data as OrdersResponse),
+  refund: (legs: Array<{ orderNo: string; trainCode: string; fromStation: string; toStation: string }>) =>
+    http.post('/orders/refund', { legs }).then((r) => r.data as { ok: boolean }),
+  changeOptions: (body: { mode: 'to-direct' | 'to-transfer'; fromStation: string; toStation: string; date: string; departTime: string; currentTrains: string[] }) =>
+    http.post('/orders/change-options', body).then((r) => r.data as { options: ChangeOption[] }),
 };
 
 /** WebSocket 实时通道（日志/会话/任务/扫码二维码） */

@@ -61,11 +61,15 @@ export function collectFromOrders(
       const c = normCode(String(t.stationTrainDTO?.station_train_code ?? ''));
       if (d.length !== 8 || !c) continue;
       const st = String(t.ticket_status_name ?? '');
+      // 已退票 / 已改签 / 已变更到站是历史票，不能再当成「已买到」。变更到站票、改签票是当前票，要保留。
+      if (/已退票|已改签|已变更到站|已取消/.test(st)) continue;
       const isUnpaid = fromIncomplete && st.includes('待支付');
       // 支付截止时间：只有"待支付"票才有意义（已完成订单的 pay_limit_time 是 2099 哨兵值）。
       // 优先取订单层，退到票层；交给调度器的"支付到期定时器"使用。
       const payLimitTs = isUnpaid ? parseCnTimestamp(o.pay_limit_time ?? t.pay_limit_time) : null;
-      map.set(`${d}|${c}`, { orderNo, status: isUnpaid ? 'unpaid' : 'paid', payLimitTs });
+      const from = String(t.stationTrainDTO?.from_station_name ?? '').trim();
+      const to = String(t.stationTrainDTO?.to_station_name ?? '').trim();
+      map.set(`${d}|${c}|${from}|${to}`, { orderNo, status: isUnpaid ? 'unpaid' : 'paid', payLimitTs });
     }
   }
 }
