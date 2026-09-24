@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeOrders } from '../bot/orders.js';
-import { ticketYuan, type RawTicket } from '../bot/orderApi.js';
+import { fmtDay, ticketYuan, type RawTicket } from '../bot/orderApi.js';
+import { saleAtFromApi } from '../bot/tickets.js';
 // Synthetic prices; these are not a claim about G1716's actual fare.
 const ticket = (extra: Partial<RawTicket> = {}): RawTicket => ({ start_train_date_page:'2026-09-24 10:00', ticket_status_name:'已支付', passenger_name:'测试甲', seat_type_name:'二等座', ticket_price:31000, stationTrainDTO:{station_train_code:'G1716',from_station_name:'常州北',to_station_name:'信阳东'}, ...extra });
 test('prices stay with their own journey and ticket status', () => {
@@ -45,7 +46,18 @@ test('arrival uses the official destination date, including overnight and multi-
   const rows=normalizeOrders([{sequence_no:'ARRIVAL',tickets:[ticket({stationTrainDTO:{station_train_code:'G1716',arrive_time:arrival}})]}],[]);
   assert.equal(rows[0].arrivalDateTime,arrival.slice(0,16));
  }
- for (const arrival of [undefined,'','06:15','invalid','2026-02-30 06:15','2026-09-25 25:00']) {
+ for (const arrival of [undefined,'','invalid','2026-02-30 06:15','2026-09-25 25:00']) {
   assert.equal(normalizeOrders([{sequence_no:'UNKNOWN',tickets:[ticket({stationTrainDTO:{arrive_time:arrival}})]}],[])[0].arrivalDateTime,null);
  }
+ const sameDay=normalizeOrders([{sequence_no:'CLOCK',tickets:[ticket({stationTrainDTO:{station_train_code:'G1716',arrive_time:'18:32'}})]}],[]);
+ assert.equal(sameDay[0].arrivalDateTime,'2026-09-24 18:32');
+ const overnight=normalizeOrders([{sequence_no:'CLOCK',tickets:[ticket({stationTrainDTO:{station_train_code:'G1716',arrive_time:'06:15'}})]}],[]);
+ assert.equal(overnight[0].arrivalDateTime,'2026-09-25 06:15');
+});
+
+test('sale clock is not attached to the travel date, and order dates use Beijing time', () => {
+ assert.equal(saleAtFromApi('2026-09-28','08:00','2026-09-14'),'2026-09-14T08:00:00+08:00');
+ assert.equal(saleAtFromApi('2026-09-28','08:30','2026-09-28'),'2026-09-14T08:30:00+08:00');
+ assert.equal(saleAtFromApi('2026-09-28','2026-09-14 08:00'),'2026-09-14T08:00:00+08:00');
+ assert.equal(fmtDay(new Date('2026-09-21T16:01:00Z')),'2026-09-22');
 });

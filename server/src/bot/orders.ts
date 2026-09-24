@@ -63,14 +63,38 @@ function normDateTime(s: string | null | undefined): string {
   return h ? `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')} ${hh}:${(mi ?? '00').padStart(2, '0')}` : `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
 }
 
-/** 只接受包含日期的到达时间，不能凭时刻猜测跨日。 */
-function arrivalDateTime(ticket: RawTicket): string | null {
-  const value = normDateTime(ticket.stationTrainDTO?.arrive_time);
+/** 校验北京时间字符串，非法日期（如 2 月 30 日）返回 null。 */
+function validBeijing(value: string): string | null {
   if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(value)) return null;
   const instant = new Date(value.replace(' ', 'T') + ':00+08:00');
   if (!Number.isFinite(instant.getTime())) return null;
-  const normalized = new Date(instant.getTime() + 8 * 3600000).toISOString().slice(0,16).replace('T',' ');
+  const normalized = new Date(instant.getTime() + 8 * 3600000).toISOString().slice(0, 16).replace('T', ' ');
   return normalized === value ? value : null;
+}
+
+function nextCalendarDay(date: string): string {
+  const d = new Date(date + 'T12:00:00.000Z');
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * 到达时间。接口若已带日期则直接采用（含跨多日）。
+ * 只有 HH:mm 时，用乘车日拼上；时刻早于出发则算次日，避免全程显示「待确认」。
+ */
+function arrivalDateTime(ticket: RawTicket): string | null {
+  const raw = String(ticket.stationTrainDTO?.arrive_time ?? '').trim();
+  const dated = validBeijing(normDateTime(raw));
+  if (dated) return dated;
+  const clock = /^(\d{1,2}):(\d{2})$/.exec(raw);
+  if (!clock) return null;
+  const depart = normDateTime(ticket.start_train_date_page ?? ticket.train_date);
+  const dm = /^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2})$/.exec(depart);
+  if (!dm) return null;
+  const hh = clock[1].padStart(2, '0');
+  const mi = clock[2];
+  const date = `${hh}:${mi}` < `${dm[2]}:${dm[3]}` ? nextCalendarDay(dm[1]) : dm[1];
+  return validBeijing(`${date} ${hh}:${mi}`);
 }
 
 /**
@@ -239,16 +263,20 @@ export async function queryOrders(context: BrowserContext): Promise<OrderRow[]> 
     }
 
     // 2) 未完成订单覆盖入表（待支付/待出票）——POST，列表在 orderDBList
+    let incompleteOk = false;
     try {
-      const list = await fetchIncompleteOrders(page);
+      // 空响应不能当成「没有待支付」。未确认就抛错，让页面保留旧数据，而不是把待支付藏掉。
+      const list = await fetchIncompleteOrders(page, true);
       ingestOrders(list, map, true);
       logger.info('未完成订单入表', { count: list.length });
+      incompleteOk = true;
       anyOk = true;
     } catch (e) {
       logger.warn('已购票：未完成订单查询失败', e instanceof Error ? e.message : String(e));
     }
 
     if (!anyOk) throw new Error('12306 订单查询失败（未完成与已完成接口均无响应，可能登录已失效）');
+    if (!incompleteOk) throw new Error('未完成订单查询未确认');
 
     const rows = [...map.values()].map(toRow);
     rows.sort((a, b) => {

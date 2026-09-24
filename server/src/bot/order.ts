@@ -152,7 +152,7 @@ function pickSeat(train: TrainInfo, params: PurchaseParams): { code: string; nam
  * 下单前查重 + 冲突检测：在"已购"集合（未完成订单 ∪ 已完成订单）中查找。
  *
  * 1) 同日期 + 同车次 → 已购得（无论已支付还是未支付），无需再下单，直接标记当日计划完成。
- * 2) 存在**其他日期**的未支付订单 → 12306 每个账户同时只允许一个未支付订单，
+ * 2) 存在其他未支付订单（含同日不同车次）→ 12306 每个账户同时只允许一个未支付订单，
  *    此时点"预订"不会跳确认页（页面弹窗提示先支付/取消），必须等用户处理掉才能继续。
  *
  * 查重失败时 fail-open（返回 null 继续走下单流程）：真有未支付订单时，
@@ -177,13 +177,12 @@ async function checkOrders(
   const code = trainCode.replace(/\s/g, '').toUpperCase();
   const hit = [...purchased.entries()].find(([k]) => k.slice(0, 8) === day && k.split('|')[1] === code);
   if (hit) return { duplicated: { orderNo: hit[1].orderNo, paid: hit[1].status === 'paid', payLimitTs: hit[1].payLimitTs } };
-  // 12306 只允许一个未支付订单：其他日期的未支付订单会拦死新订单
+  // 12306 只允许一个未支付订单：同日不同车次、以及其他日期的未支付订单都会拦死新订单
   for (const [k, v] of purchased) {
     if (v.status !== 'unpaid') continue;
     const [d, c] = k.split('|');
-    if (d.slice(0, 8) !== day) {
-      return { blockingUnpaid: { orderNo: v.orderNo, date: d.slice(0, 8), trainCode: c } };
-    }
+    if (d.slice(0, 8) === day && c === code) continue;
+    return { blockingUnpaid: { orderNo: v.orderNo, date: d.slice(0, 8), trainCode: c } };
   }
   return null;
 }

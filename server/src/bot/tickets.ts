@@ -103,6 +103,27 @@ export async function queryTrains(context: BrowserContext, params: QueryParams):
   }
 }
 
+/** 从起售接口拼出北京时间。时刻若自带日期就用该日期；否则用响应里的开售日。响应日与乘车日相同或缺失时，按预售期回推，避免把开售时刻标到出发当天。 */
+export function saleAtFromApi(travelDate: string, saleTime: string, responseTrainDate?: string): string | null {
+  const text = saleTime.trim();
+  const full = /^(\d{4})\D(\d{1,2})\D(\d{1,2})[ T](\d{1,2}):(\d{2})/.exec(text);
+  if (full) {
+    const day = `${full[1]}-${full[2].padStart(2, '0')}-${full[3].padStart(2, '0')}`;
+    return `${day}T${full[4].padStart(2, '0')}:${full[5]}:00+08:00`;
+  }
+  const hm = /^(\d{1,2}):(\d{2})/.exec(text);
+  if (!hm) return null;
+  const clock = `${hm[1].padStart(2, '0')}:${hm[2]}`;
+  const travel = travelDate.slice(0, 10);
+  const responseDay = /^\d{8}$/.test(responseTrainDate ?? '')
+    ? `${responseTrainDate!.slice(0, 4)}-${responseTrainDate!.slice(4, 6)}-${responseTrainDate!.slice(6, 8)}`
+    : (responseTrainDate ?? '').slice(0, 10);
+  const saleDay = /^\d{4}-\d{2}-\d{2}$/.test(responseDay) && responseDay !== travel
+    ? responseDay
+    : addDays(travel, -DEFAULT_PRESALE_DAYS);
+  return `${saleDay}T${clock}:00+08:00`;
+}
+
 /**
  * 查询车票起售时间（精确到分秒）。
  * 优先 12306 起售查询接口；失败时按预售期推算（乘车日 - N 天，起售时刻取车站常见起售点）。
@@ -129,9 +150,11 @@ export async function querySaleTime(
     }, url);
     const data = JSON.parse(raw) as { httpstatus?: number; data?: { sale_time?: string; train_date?: string }; messages?: string[] };
     if (data?.data?.sale_time) {
-      const iso = `${args.trainDate}T${data.data.sale_time}:00+08:00`;
-      logger.info('起售时间（接口）', { train: args.trainCode, date: args.trainDate, saleTime: data.data.sale_time });
-      return { saleAt: iso, source: 'api' };
+      const iso = saleAtFromApi(args.trainDate, data.data.sale_time, data.data.train_date);
+      if (iso) {
+        logger.info('起售时间（接口）', { train: args.trainCode, date: args.trainDate, saleTime: data.data.sale_time, saleAt: iso });
+        return { saleAt: iso, source: 'api' };
+      }
     }
     logger.warn('起售时间接口未返回，使用预售期推算', { raw: raw.slice(0, 200) });
   } catch (e) {

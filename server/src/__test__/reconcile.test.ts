@@ -13,6 +13,18 @@ test('repeated reconciliation finds the paid ticket by date despite its departur
  }
 });
 
+test('refunded and changed-away tickets are not treated as still purchased', () => {
+ const map=new Map<string,PurchasedTicket>();
+ collectFromOrders([{sequence_no:'TEST',tickets:[
+  {start_train_date_page:'2026-09-28 06:53',stationTrainDTO:{station_train_code:'G1509'},ticket_status_name:'已退票'},
+  {start_train_date_page:'2026-09-28 08:00',stationTrainDTO:{station_train_code:'G1510'},ticket_status_name:'已变更到站'},
+  {start_train_date_page:'2026-09-28 09:00',stationTrainDTO:{station_train_code:'G1511'},ticket_status_name:'变更到站票'},
+ ]}],map,false);
+ assert.equal(map.has('20260928|G1509'),false);
+ assert.equal(map.has('20260928|G1510'),false);
+ assert.equal(map.get('20260928|G1511')?.status,'paid');
+});
+
 test('incomplete order snapshots never authorize a reconciliation rollback', async () => {
  for (const failed of ['complete','incomplete','empty','invalid','none']) {
   let closed=false;
