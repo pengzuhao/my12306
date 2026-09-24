@@ -17,6 +17,7 @@ module.exports = {
   artifactName: '${productName}-${version}-${os}-${arch}' + (mode === 'auto' ? '' : `-${mode}`) + '.${ext}',
   mac: { category: 'public.app-category.utilities', target: ['dmg'], icon: 'assets/icon.icns', hardenedRuntime: !unsigned, ...(unsigned ? { identity: null, notarize: false } : mode === 'signed' ? { notarize: true } : {}), entitlements: 'assets/entitlements.mac.plist', entitlementsInherit: 'assets/entitlements.mac.plist' },
   win: { ...(unsigned ? { signExecutable: false } : {}), target: ['nsis'], icon: 'assets/icon.ico' },
+  linux: { target: ['AppImage', 'tar.gz'], category: 'Utility', icon: 'assets/icon.png' },
   dmg: { format: 'ULFO' },
   nsis: { oneClick: false, perMachine: false, allowToChangeInstallationDirectory: true, createDesktopShortcut: true, deleteAppDataOnUninstall: false },
 };
