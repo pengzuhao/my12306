@@ -23,11 +23,13 @@ import {
 import { Logger } from '../logger.js';
 import { groupJourneys } from './journey.js';
 
+import { fetchPersonalOrders, mergePersonalOrders } from './personal-orders.js';
 const logger = new Logger('bot');
 
 /** 同一订单的一个行程及票面状态（同程多人合并为一行） */
 export interface OrderRow {
   orderNo: string;
+  personalOnly?: boolean;
   /** unpaid=待支付；paid=已支付/已出票/已出站；refunded=已退票 */
   status: 'unpaid' | 'paid' | 'refunded';
   /** 12306 票面状态原文，如「待支付」/「已支付」/「已出票」 */
@@ -128,6 +130,7 @@ export function parseCnTimestamp(s: string | null | undefined): number | null {
 
 interface AccumOrder {
   orderNo: string;
+  personalOnly?: boolean;
   fromIncomplete: boolean;
   statusText: string;
   travelDateTime: string;
@@ -176,6 +179,7 @@ function ingestOrders(
 
       map.set(key, {
         orderNo,
+        personalOnly: tickets.some(t => t.personalOnly),
         fromIncomplete,
         statusText,
         travelDateTime: normDateTime(t0.start_train_date_page ?? t0.train_date),
@@ -235,6 +239,7 @@ function toRow(a: AccumOrder): OrderRow {
   }
   return {
     orderNo: a.orderNo,
+    personalOnly: a.personalOnly,
     status,
     statusText,
     travelDateTime: a.travelDateTime,
@@ -267,7 +272,7 @@ export function normalizeOrders(completed: RawOrder[], incomplete: RawOrder[]): 
  * 排序：待支付在前（按支付截止时间升序，最紧急的在最上面），其余按乘车时间倒序。
  * 两个接口任一失败都 fail-open（返回能拿到的部分）；都失败时抛错让调用方提示用户。
  */
-export async function queryOrders(context: BrowserContext): Promise<OrderRow[]> {
+export async function queryOrders(context: BrowserContext, onPersonalError?: (message: string) => void): Promise<OrderRow[]> {
   const page = await context.newPage();
   try {
     // 先 initDc 预热 UAM 链，再停在订单查询页（fetch 的 Referer 由页面 URL 决定，
@@ -279,7 +284,13 @@ export async function queryOrders(context: BrowserContext): Promise<OrderRow[]> 
 
     // 1) 已完成订单先入表（已支付/已出票）——POST 分页查询，列表在 OrderDTODataList
     try {
-      const list = await fetchCompletedOrders(page);
+      let list = await fetchCompletedOrders(page);
+      try { if (onPersonalError) list = mergePersonalOrders(list, await fetchPersonalOrders(context)); }
+      catch (error) {
+        const message = error instanceof Error ? error.message : '本人车票同步失败';
+        onPersonalError?.(message);
+        logger.warn('本人车票同步未完成', { message });
+      }
       ingestOrders(list, map, false);
       logger.info('已完成订单入表', { count: list.length });
       anyOk = true;

@@ -15,6 +15,7 @@ import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { ordersApi, type ChangeOption, type OrderRow } from '../api';
+import PersonalTicketVerification from '../components/PersonalTicketVerification.vue';
 import ShareImageDialog from '../components/ShareImageDialog.vue';
 import type { ShareContent } from '../utils/share-image';
 const shareContent = ref<ShareContent | null>(null);
@@ -114,6 +115,7 @@ function refundLabel(item: JourneyView, leg: OrderRow): string {
 
 async function refundLegs(legs: OrderRow[]): Promise<void> {
   if (refunding.value || !legs.length) return;
+  if (legs.some(leg => leg.personalOnly)) { ElMessage.info('他人代购车票请在 12306 本人车票中办理退改'); return; }
   const text = legs.length > 1
     ? `确认退掉全部 ${legs.length} 程？待支付的会取消订单，已支付的按 12306 规则扣退票费。`
     : `确认退 ${legs[0].trainCode} ${legs[0].fromStation} → ${legs[0].toStation}？`;
@@ -204,7 +206,7 @@ async function load(force = false): Promise<void> {
     orders.value = data.orders;
     fetchedAt.value = data.fetchedAt;
     cached.value = !!data.cached;
-    errorMsg.value = data.stale ? `刷新失败，显示 ${fmtCn(new Date(data.fetchedAt).toISOString())} 的旧数据：${data.error ?? ''}` : '';
+    errorMsg.value = data.stale ? `刷新失败，显示 ${fmtCn(new Date(data.fetchedAt).toISOString())} 的旧数据：${data.error ?? ''}` : (data.warning ?? '');
     scheduleExpiryRefresh();
   } catch (e) {
     errorMsg.value = (e as { response?: { data?: { error?: string } } }).response?.data?.error ?? '查询已购车票失败';
@@ -300,6 +302,7 @@ onBeforeUnmount(() => {
         </div>
       </template>
 
+      <PersonalTicketVerification @verified="load()" />
       <div v-if="errorMsg" style="color: #e6a23c; margin-bottom: 12px; font-size: 13px">{{ errorMsg }}</div>
 
       <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap">
@@ -327,9 +330,9 @@ onBeforeUnmount(() => {
           <div class="ticket-bottom">
             <span>{{ journeyPrice(item) }}</span>
             <span>
-              <el-button v-if="item.legs.some(leg => leg.status !== 'refunded')" type="danger" plain size="small" @click="item.legs.length > 1 ? refundLegs(item.legs.filter(leg => leg.status !== 'refunded')) : refundLegs(item.legs)">{{ item.legs.length > 1 ? '全部退' : '退票' }}</el-button>
+              <el-button v-if="!item.legs.some(leg => leg.personalOnly) && item.legs.some(leg => leg.status !== 'refunded')" type="danger" plain size="small" @click="item.legs.length > 1 ? refundLegs(item.legs.filter(leg => leg.status !== 'refunded')) : refundLegs(item.legs)">{{ item.legs.length > 1 ? '全部退' : '退票' }}</el-button>
               <el-button v-for="leg in item.legs.filter(leg => item.legs.length > 1 && leg.status !== 'refunded')" :key="leg.orderNo + leg.fromStation + leg.toStation" type="danger" plain size="small" @click="refundLegs([leg])">{{ refundLabel(item, leg) }}</el-button>
-              <el-button v-if="item.legs[0].status !== 'refunded'" type="primary" plain size="small" @click="openChange(item)">智能改签</el-button>
+              <el-button v-if="!item.legs.some(leg => leg.personalOnly) && item.legs[0].status !== 'refunded'" type="primary" plain size="small" @click="openChange(item)">智能改签</el-button>
             </span>
           </div>
         </article>
@@ -377,7 +380,7 @@ onBeforeUnmount(() => {
         </el-table-column>
         <el-table-column label="支付截止" width="180">
           <template #default="{ row }">
-            <template v-if="row.legs.some((leg: OrderRow) => leg.status === 'unpaid')">
+            <template v-if="!row.legs.some((leg: OrderRow) => leg.personalOnly) && row.legs.some((leg: OrderRow) => leg.status === 'unpaid')">
               <div v-for="leg in row.legs.filter((leg: OrderRow) => leg.status === 'unpaid')" :key="leg.orderNo" class="mono">{{ leg.payLimitTime ?? '-' }}</div>
             </template>
             <span v-else style="color: #909399">—</span>
@@ -386,9 +389,9 @@ onBeforeUnmount(() => {
         <el-table-column label="操作" min-width="250" fixed="right">
           <template #default="{ row }">
             <div class="row-actions">
-            <el-button v-if="row.legs.some((leg: OrderRow) => leg.status !== 'refunded')" link type="danger" @click="refundLegs(row.legs.length > 1 ? row.legs.filter((leg: OrderRow) => leg.status !== 'refunded') : row.legs)">{{ row.legs.length > 1 ? '全部退' : '退票' }}</el-button>
+            <el-button v-if="!row.legs.some((leg: OrderRow) => leg.personalOnly) && row.legs.some((leg: OrderRow) => leg.status !== 'refunded')" link type="danger" @click="refundLegs(row.legs.length > 1 ? row.legs.filter((leg: OrderRow) => leg.status !== 'refunded') : row.legs)">{{ row.legs.length > 1 ? '全部退' : '退票' }}</el-button>
             <el-button v-for="leg in row.legs.filter((leg: OrderRow) => row.legs.length > 1 && leg.status !== 'refunded')" :key="leg.orderNo + leg.fromStation + leg.toStation" link type="danger" @click="refundLegs([leg])">{{ refundLabel(row, leg) }}</el-button>
-            <el-button v-if="row.legs[0].status !== 'refunded'" link type="primary" @click="openChange(row)">智能改签</el-button>
+            <el-button v-if="!row.legs.some((leg: OrderRow) => leg.personalOnly) && row.legs[0].status !== 'refunded'" link type="primary" @click="openChange(row)">智能改签</el-button>
             <el-button link type="primary" @click="shareContent = { kind: 'ticket', ticket: row.legs[0] }">分享</el-button>
             </div>
           </template>

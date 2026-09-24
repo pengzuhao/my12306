@@ -19,7 +19,9 @@ import { queryTrains, queryTransfers } from '../bot/tickets.js';
 import { withUserLock } from '../bot/user-lock.js';
 import { Logger } from '../logger.js';
 
+import { personalRequest } from '../bot/personal-orders.js';
 const logger = new Logger('orders');
+const personalVerifications = new Map<string, { uuid: string; expires: number }>();
 
 /** 同一用户两次真实查询 12306 的最小间隔（毫秒），之内返回缓存 */
 const ORDER_MIN_INTERVAL_MS = 20_000;
@@ -27,6 +29,7 @@ const ORDER_MIN_INTERVAL_MS = 20_000;
 interface CacheEntry {
   ts: number;
   rows: OrderRow[];
+  warning?: string;
 }
 const cache = new Map<string, CacheEntry>();
 
@@ -43,6 +46,25 @@ export function repairTaskResults(userId: string, orders: OrderRow[]): void {
 }
 
 export const orderRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, done) => {
+  app.post('/api/orders/personal-verification', async request => {
+    const user = currentUser(request);
+    if (RailwayAccountRepo.get(user.id)?.status !== 'active') throw new Error('请先登录 12306');
+    const ctx = await getContext(user.id);
+    const data = await personalRequest(ctx, '/passport/web/create-verifyqr64', { appid: 'otn', authType: 'itinerary' });
+    if (Number(data.result_code) !== 0 || typeof data.uuid !== 'string' || typeof data.image !== 'string' || !/^[A-Za-z0-9+/=\r\n]+$/.test(data.image)) throw new Error('核验二维码生成失败，请重试');
+    personalVerifications.set(user.id, { uuid: data.uuid, expires: Date.now()+180000 });
+    return { image: 'data:image/jpeg;base64,'+data.image };
+  });
+  app.get('/api/orders/personal-verification', async request => {
+    const user = currentUser(request), attempt = personalVerifications.get(user.id);
+    if (!attempt || attempt.expires < Date.now()) return { status: 'expired' };
+    const ctx = await getContext(user.id);
+    const data = await personalRequest(ctx, '/otn/psr/checkVerifyqr', { appid:'otn', uuid:attempt.uuid });
+    const status = Number(data.data);
+    if (status === 2) { personalVerifications.delete(user.id); cache.delete(user.id); return { status:'verified' }; }
+    if ([3,4,5].includes(status)) { personalVerifications.delete(user.id); return { status:'expired' }; }
+    return { status: status === 1 ? 'scanned' : 'waiting' };
+  });
   /** 查询已购车票（已支付 + 待支付） */
   app.get('/api/orders', async (request, reply) => {
     const user = currentUser(request);
@@ -56,16 +78,17 @@ export const orderRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, 
     const hit = cache.get(user.id);
     if (hit && now - hit.ts < ORDER_MIN_INTERVAL_MS) {
       repairTaskResults(user.id, hit.rows);
-      return { orders: hit.rows, fetchedAt: hit.ts, cached: true };
+      return { orders: hit.rows, fetchedAt: hit.ts, cached: true, warning: hit.warning };
     }
 
     try {
       const ctx = await getContext(user.id);
-      const rows = await queryOrders(ctx);
+      let warning: string | undefined;
+      const rows = await queryOrders(ctx, message => { warning = message; });
       repairTaskResults(user.id, rows);
-      cache.set(user.id, { ts: now, rows });
+      cache.set(user.id, { ts: now, rows, warning });
       logger.info('已购票查询成功', { by: user.username, count: rows.length, unpaid: rows.filter((r) => r.status === 'unpaid').length });
-      return { orders: rows, fetchedAt: now, cached: false };
+      return { orders: rows, fetchedAt: now, cached: false, warning };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logger.warn('已购票查询失败', { by: user.username, error: msg });
@@ -96,6 +119,7 @@ export const orderRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, 
         const wanted = parsed.data.legs;
         const hits = rows.filter((row) => row.status !== 'refunded' && wanted.some((leg) =>
           leg.orderNo === row.orderNo && leg.trainCode === row.trainCode && leg.fromStation === row.fromStation && leg.toStation === row.toStation));
+        if (hits.some(row => row.personalOnly)) throw new RefundRejected('他人代购车票请在 12306 本人车票中办理退改');
         if (hits.length !== wanted.length) throw new RefundRejected('有车票已变化，请刷新后再退');
         const tickets = hits.flatMap((row) => row.refundTickets.map((ticket) => ({ ...ticket, orderNo: row.orderNo, unpaid: row.status === 'unpaid' })));
         if (!tickets.length) throw new RefundRejected('没有可退的车票');

@@ -193,6 +193,7 @@ export const taskApi = {
 
 // ---- 已购车票（已支付 + 待支付） ----
 export interface OrderRow {
+  personalOnly?: boolean;
   orderNo: string;
   /** unpaid=待支付；paid=已支付/已出票/已出站；refunded=已退票 */
   status: 'unpaid' | 'paid' | 'refunded';
@@ -230,6 +231,7 @@ export interface ChangeOption {
 }
 
 export interface OrdersResponse {
+  warning?: string;
   orders: OrderRow[];
   fetchedAt: number;
   cached?: boolean;

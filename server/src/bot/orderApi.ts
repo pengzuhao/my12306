@@ -29,6 +29,7 @@ const ORDER_HEADERS = {
 
 /** 12306 原始票（未完成/已完成接口字段的并集） */
 export interface RawTicket {
+  personalOnly?: boolean;
   /** 乘车日期（00:00:00 形态），跨日车不是真正的上车日 */
   train_date?: string;
   /** 页面展示用的上车日期+时间，如 "2026-09-28 06:52"（跨日车以此为准） */
