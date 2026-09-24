@@ -213,24 +213,26 @@ onMounted(async () => {
     <p v-if="trains.length" class="sub-hint">共 {{ trains.length }} 趟车次 · {{ form.from }} → {{ form.to }} · {{ form.date }}</p>
     <el-table
       v-if="trains.length"
+      class="stretch-table"
       :data="trains"
       border
       v-loading="loading"
       :default-sort="{ prop: 'departTime', order: 'ascending' }"
     >
-      <el-table-column label="车次" prop="trainCode" width="100" fixed />
-      <el-table-column label="乘降站" min-width="170">
+      <el-table-column label="车次" prop="trainCode" min-width="88" />
+      <el-table-column label="乘降站" min-width="170" class-name="wrap-col">
         <template #default="{ row }">
           <div>{{ row.fromStation }} → {{ row.toStation }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="发车 → 到达" width="160" sortable prop="departTime">
+      <el-table-column label="发车 → 到达" min-width="120" sortable prop="departTime">
         <template #default="{ row }">
-          <span class="mono">{{ row.departTime }} → {{ row.arriveTime }}</span>
+          <div class="mono">{{ row.departTime }}</div>
+          <div class="mono">→ {{ row.arriveTime }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="历时" prop="duration" width="90" />
-      <el-table-column label="余票（席别）" min-width="240">
+      <el-table-column label="历时" prop="duration" min-width="84" />
+      <el-table-column label="余票（席别）" min-width="220" class-name="wrap-col">
         <template #default="{ row }">
           <div class="seat-list">
             <span v-for="(count, name) in (row.seats ?? {})" :key="name" class="seat-chip" :style="{ color: seatColor(count) }">
@@ -239,33 +241,39 @@ onMounted(async () => {
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="110" fixed="right">
+      <el-table-column label="操作" min-width="108">
         <template #default="{ row }">
           <el-button size="small" type="primary" plain @click="newPlanWithTrain(row)">加入计划</el-button>
         </template>
       </el-table-column>
     </el-table>
     <p v-if="schemes.length" class="sub-hint">换乘 / 同车接续 / 补票 · {{ schemes.length }} 个方案。一次会为每一程各建一个购票计划。</p>
-    <el-table v-if="schemes.length" :data="schemes" border style="margin-top: 8px">
-      <el-table-column label="方案" prop="label" width="100" />
-      <el-table-column label="行程" min-width="280">
+    <el-table v-if="schemes.length" class="stretch-table" :data="schemes" border style="margin-top: 8px">
+      <el-table-column label="方案" prop="label" min-width="88" />
+      <el-table-column label="行程" min-width="240" class-name="wrap-col">
         <template #default="{ row }">
-          <div v-for="(leg, i) in row.legs" :key="i">{{ leg.trainCode }} {{ leg.fromStation }} → {{ leg.toStation }} {{ leg.departTime }}–{{ leg.arriveTime }}</div>
+          <div v-for="(leg, i) in row.legs" :key="i" class="scheme-leg">
+            <div>{{ leg.trainCode }} {{ leg.fromStation }} → {{ leg.toStation }}</div>
+            <div class="sub-hint">{{ leg.departTime }}–{{ leg.arriveTime }}</div>
+          </div>
           <div v-if="row.middleStation" class="sub-hint">经 {{ row.middleStation }}<span v-if="row.waitTime"> · 等候 {{ row.waitTime }}</span></div>
         </template>
       </el-table-column>
-      <el-table-column label="发车 → 到达" width="140">
-        <template #default="{ row }"><span class="mono">{{ row.departTime }} → {{ row.arriveTime }}</span></template>
+      <el-table-column label="发车 → 到达" min-width="110">
+        <template #default="{ row }">
+          <div class="mono">{{ row.departTime }}</div>
+          <div class="mono">→ {{ row.arriveTime }}</div>
+        </template>
       </el-table-column>
-      <el-table-column label="总历时" prop="duration" width="90" />
-      <el-table-column label="余票" min-width="200">
+      <el-table-column label="总历时" prop="duration" min-width="84" />
+      <el-table-column label="余票" min-width="180" class-name="wrap-col">
         <template #default="{ row }">
           <div v-for="(leg, i) in row.legs" :key="i" class="seat-list">
             <span v-for="(count, name) in leg.seats" :key="name" class="seat-chip" :style="{ color: seatColor(count) }">{{ name }} {{ count }}</span>
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="140" fixed="right">
+      <el-table-column label="操作" min-width="132">
         <template #default="{ row }">
           <el-button size="small" type="primary" plain @click="newPlanWithScheme(row)">加入全部行程</el-button>
         </template>
@@ -298,4 +306,10 @@ onMounted(async () => {
   white-space: nowrap;
   font-weight: 600;
 }
+.stretch-table { width: 100%; }
+.stretch-table :deep(table) { min-width: 860px; }
+.stretch-table :deep(.el-table__body-wrapper),
+.stretch-table :deep(.el-scrollbar__wrap) { overflow-x: auto; }
+.stretch-table :deep(.wrap-col .cell) { white-space: normal; text-overflow: clip; overflow: visible; line-height: 1.45; }
+.scheme-leg + .scheme-leg { margin-top: 4px; }
 </style>

@@ -56,7 +56,7 @@ onMounted(async () => {
           <el-button type="primary" @click="editor.openNew">新建计划</el-button>
         </div>
       </template>
-      <el-table :data="plans" border>
+      <el-table class="stretch-table" :data="plans" border>
         <el-table-column label="名称" min-width="160">
           <template #default="{ row }">
             <el-link type="primary" @click="detail.openDetail(row)">{{ row.name }}</el-link>
@@ -88,21 +88,21 @@ onMounted(async () => {
             <div class="mono">{{ row.trainNumbers ? row.trainNumbers.join(', ') : '自动匹配' }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="座位/席别" width="130">
+        <el-table-column label="座位/席别" min-width="150" class-name="wrap-col">
           <template #default="{ row }">
             <div>{{ row.seatPositions ? row.seatPositions.join('/') : '不指定' }}</div>
             <div style="font-size: 12px; color: #909399">{{ editor.seatTypeName(row.seatTypes) }}</div>
             <el-tag v-if="row.allowNoSeat" size="small" type="warning" style="margin-top: 2px">允许无座</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="90">
+        <el-table-column label="状态" min-width="96">
           <template #default="{ row }">
             <el-tag :type="row.status === 'active' ? 'success' : row.status === 'paused' ? 'warning' : 'info'">
               {{ row.status === 'active' ? '进行中' : row.status === 'paused' ? '已暂停' : '已删除' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="90" fixed="right">
+        <el-table-column label="操作" min-width="96">
           <template #default="{ row }">
             <el-dropdown trigger="click" @command="(cmd: string) => void handlePlanCommand(cmd, row)">
               <el-button size="small" plain>操作<span class="plan-caret" /></el-button>
@@ -134,4 +134,7 @@ onMounted(async () => {
   border-top-color: currentColor;
   vertical-align: -2px;
 }
+.stretch-table { width: 100%; }
+.stretch-table :deep(table) { min-width: 860px; }
+.stretch-table :deep(.wrap-col .cell) { white-space: normal; text-overflow: clip; overflow: visible; line-height: 1.45; }
 </style>

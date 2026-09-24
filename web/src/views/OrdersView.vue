@@ -95,14 +95,21 @@ function money(value: number): string {
   return `¥${value.toFixed(2)}`;
 }
 
-/** 单程只显示总价。换乘显示总价和每一程，例如 ¥425.00（¥200.00/¥225.00）。 */
+/** 单程只显示总价。换乘在总价下再写每一程，避免一行被表格截断。 */
 function journeyPrice(item: JourneyView): string {
-  const prices = item.legs.map((leg) => leg.totalPrice);
-  if (prices.every((price) => price == null)) return '';
-  const total = prices.reduce<number>((sum, price) => sum + (price ?? 0), 0);
+  const total = priceTotal(item);
+  if (total == null) return '';
   const head = money(total);
   if (item.legs.length < 2) return head;
-  return `${head}（${prices.map((price) => (price == null ? '—' : money(price))).join('/')}）`;
+  return `${head}（${priceParts(item)}）`;
+}
+function priceTotal(item: JourneyView): number | null {
+  const prices = item.legs.map((leg) => leg.totalPrice);
+  if (prices.every((price) => price == null)) return null;
+  return prices.reduce<number>((sum, price) => sum + (price ?? 0), 0);
+}
+function priceParts(item: JourneyView): string {
+  return item.legs.map((leg) => (leg.totalPrice == null ? '—' : money(leg.totalPrice))).join(' / ');
 }
 
 /** 同车接续两程车次相同，退票按钮用区间区分。 */
@@ -334,25 +341,28 @@ onBeforeUnmount(() => {
           </div>
         </article>
       </div>
-      <el-table class="desktop-tickets" :data="journeys" border v-loading="loading" empty-text="暂无已购车票">
-        <el-table-column label="订单号" width="150">
+      <el-table class="desktop-tickets" :data="journeys" border v-loading="loading" empty-text="暂无已购车票" style="width: 100%">
+        <el-table-column label="订单号" min-width="148">
           <template #default="{ row }">
             <div v-for="leg in row.legs" :key="leg.orderNo + leg.trainCode" class="mono">{{ leg.orderNo }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="110">
+        <el-table-column label="状态" min-width="108">
           <template #default="{ row }">
             <div v-for="leg in row.legs" :key="leg.orderNo + leg.statusText">
               <el-tag :type="STATUS_META[leg.status as OrderRow['status']].type">{{ leg.statusText || STATUS_META[leg.status as OrderRow['status']].label }}</el-tag>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="出发 / 到达" width="190">
+        <el-table-column label="出发 / 到达" min-width="168" class-name="wrap-col">
           <template #default="{ row }">
-            <div v-for="leg in row.legs" :key="leg.trainCode + leg.travelDateTime" class="mono">{{ leg.trainCode }} {{ leg.travelDateTime }} → {{ leg.arrivalDateTime || '待确认' }}</div>
+            <div v-for="leg in row.legs" :key="leg.trainCode + leg.travelDateTime" class="trip-time">
+              <div class="mono">{{ leg.trainCode }} {{ leg.travelDateTime }}</div>
+              <div class="mono trip-arrive">→ {{ leg.arrivalDateTime || '待确认' }}</div>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="车次" width="90">
+        <el-table-column label="车次" min-width="96">
           <template #default="{ row }">{{ journeyTrains(row) }}</template>
         </el-table-column>
         <el-table-column label="发到站" min-width="160">
@@ -364,18 +374,21 @@ onBeforeUnmount(() => {
         <el-table-column label="乘车人" min-width="140">
           <template #default="{ row }">{{ (row.legs[0].passengers ?? []).join('、') || '-' }}</template>
         </el-table-column>
-        <el-table-column label="席别" min-width="140">
+        <el-table-column label="席别" min-width="160" class-name="wrap-col">
           <template #default="{ row }">
             <div v-for="leg in row.legs" :key="leg.trainCode + (leg.seats ?? []).join()">{{ leg.trainCode }} {{ (leg.seats ?? []).join('、') || '-' }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="票价" min-width="210">
+        <el-table-column label="票价" min-width="168" class-name="price-col">
           <template #default="{ row }">
-            <span v-if="journeyPrice(row)">{{ journeyPrice(row) }}</span>
+            <div v-if="priceTotal(row) != null" class="price-lines">
+              <div>{{ money(priceTotal(row) ?? 0) }}</div>
+              <div v-if="row.legs.length > 1" class="price-parts">{{ priceParts(row) }}</div>
+            </div>
             <span v-else>-</span>
           </template>
         </el-table-column>
-        <el-table-column label="支付截止" width="180">
+        <el-table-column label="支付截止" min-width="148">
           <template #default="{ row }">
             <template v-if="row.legs.some((leg: OrderRow) => leg.status === 'unpaid')">
               <div v-for="leg in row.legs.filter((leg: OrderRow) => leg.status === 'unpaid')" :key="leg.orderNo" class="mono">{{ leg.payLimitTime ?? '-' }}</div>
@@ -383,7 +396,7 @@ onBeforeUnmount(() => {
             <span v-else style="color: #909399">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" min-width="250" fixed="right">
+        <el-table-column label="操作" min-width="196">
           <template #default="{ row }">
             <div class="row-actions">
             <el-button v-if="row.legs.some((leg: OrderRow) => leg.status !== 'refunded')" link type="danger" @click="refundLegs(row.legs.length > 1 ? row.legs.filter((leg: OrderRow) => leg.status !== 'refunded') : row.legs)">{{ row.legs.length > 1 ? '全部退' : '退票' }}</el-button>
@@ -419,6 +432,15 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.desktop-tickets { width: 100%; }
+.desktop-tickets :deep(table) { min-width: 1180px; }
+.desktop-tickets :deep(.el-table__body-wrapper),
+.desktop-tickets :deep(.el-scrollbar__wrap) { overflow-x: auto; }
+.desktop-tickets :deep(.price-col .cell),
+.desktop-tickets :deep(.wrap-col .cell) { white-space: normal; text-overflow: clip; overflow: visible; line-height: 1.45; }
+.trip-time + .trip-time { margin-top: 4px; }
+.trip-arrive { color: #606266; }
+.price-parts { color: #606266; font-size: 12px; }
 .row-actions { display: flex; flex-direction: column; align-items: flex-start; }
 .row-actions :deep(.el-button) { margin-left: 0; height: auto; padding: 2px 0; }
 .mobile-tickets { display: none; }
