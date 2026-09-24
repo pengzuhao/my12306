@@ -78,23 +78,31 @@ function nextCalendarDay(date: string): string {
   return d.toISOString().slice(0, 10);
 }
 
+/** 从「HH:mm」或「日期 + 时刻」里取出钟点。 */
+function clockOf(raw: string): { hh: string; mi: string } | null {
+  const hm = /(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(raw.trim());
+  if (!hm) return null;
+  const hh = Number(hm[1]);
+  const mi = Number(hm[2]);
+  if (hh > 23 || mi > 59) return null;
+  return { hh: String(hh).padStart(2, '0'), mi: hm[2] };
+}
+
 /**
- * 到达时间。接口若已带日期则直接采用（含跨多日）。
- * 只有 HH:mm 时，用乘车日拼上；时刻早于出发则算次日，避免全程显示「待确认」。
+ * 到达时间。真实到达日（不早于乘车日，含跨多日）直接采用。
+ * 12306 常把到达时刻放在 1970-01-01 上，或只给 HH:mm：丢掉占位日期，用乘车日拼时刻；早于出发则算次日。
  */
 function arrivalDateTime(ticket: RawTicket): string | null {
   const raw = String(ticket.stationTrainDTO?.arrive_time ?? '').trim();
-  const dated = validBeijing(normDateTime(raw));
-  if (dated) return dated;
-  const clock = /^(\d{1,2}):(\d{2})$/.exec(raw);
-  if (!clock) return null;
   const depart = normDateTime(ticket.start_train_date_page ?? ticket.train_date);
   const dm = /^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2})$/.exec(depart);
-  if (!dm) return null;
-  const hh = clock[1].padStart(2, '0');
-  const mi = clock[2];
-  const date = `${hh}:${mi}` < `${dm[2]}:${dm[3]}` ? nextCalendarDay(dm[1]) : dm[1];
-  return validBeijing(`${date} ${hh}:${mi}`);
+  const dated = validBeijing(normDateTime(raw));
+  if (dated && (!dm || dated.slice(0, 10) >= dm[1])) return dated;
+  const timeOnly = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.test(raw);
+  const clock = clockOf(timeOnly ? raw : (dated ?? ''));
+  if (!clock || !dm) return null;
+  const date = `${clock.hh}:${clock.mi}` < `${dm[2]}:${dm[3]}` ? nextCalendarDay(dm[1]) : dm[1];
+  return validBeijing(`${date} ${clock.hh}:${clock.mi}`);
 }
 
 /**

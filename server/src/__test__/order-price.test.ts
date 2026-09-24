@@ -53,6 +53,10 @@ test('arrival uses the official destination date, including overnight and multi-
  assert.equal(sameDay[0].arrivalDateTime,'2026-09-24 18:32');
  const overnight=normalizeOrders([{sequence_no:'CLOCK',tickets:[ticket({stationTrainDTO:{station_train_code:'G1716',arrive_time:'06:15'}})]}],[]);
  assert.equal(overnight[0].arrivalDateTime,'2026-09-25 06:15');
+ const epoch=normalizeOrders([{sequence_no:'EPOCH',tickets:[ticket({start_train_date_page:'2026-09-25 13:03',stationTrainDTO:{station_train_code:'G1716',arrive_time:'1970-01-01 18:32:00'}})]}],[]);
+ assert.equal(epoch[0].arrivalDateTime,'2026-09-25 18:32');
+ const epochOvernight=normalizeOrders([{sequence_no:'EPOCH',tickets:[ticket({start_train_date_page:'2026-09-25 13:03',stationTrainDTO:{station_train_code:'G1716',arrive_time:'1970-01-01 06:15:00'}})]}],[]);
+ assert.equal(epochOvernight[0].arrivalDateTime,'2026-09-26 06:15');
 });
 
 test('sale clock is not attached to the travel date, and order dates use Beijing time', () => {
