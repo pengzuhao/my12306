@@ -1,0 +1,64 @@
+# 只接受手动触发。本仓库是 Electron 桌面应用，没有安卓或 iOS 工程。
+name: Release installers
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 编译平台。all 为 Mac Apple 芯片、Linux ARM、Linux AMD
+        type: choice
+        default: all
+        options: [all, mac-apple, linux-arm, linux-amd]
+      tag:
+        description: 上传到哪个 GitHub Release
+        type: string
+        default: v0.0.1
+permissions:
+  contents: write
+jobs:
+  build:
+    name: ${{ matrix.id }}
+    if: inputs.platform == 'all' || inputs.platform == matrix.id
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: mac-apple
+            os: macos-15
+            args: --mac dmg --arm64
+          - id: linux-amd
+            os: ubuntu-24.04
+            args: --linux --x64
+          - id: linux-arm
+            os: ubuntu-24.04-arm
+            args: --linux --arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+            desktop/app/package-lock.json
+      - run: npm ci
+      - run: npm run desktop:install
+      - run: npm run desktop:prepare
+      - run: node desktop/scripts/dist.mjs unsigned ${{ matrix.args }}
+      - name: Upload to ${{ inputs.tag }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes "手动编译。包含本次选中的 Mac Apple 芯片或 Linux ARM / AMD 安装包。" || true
+          fi
+          shopt -s nullglob
+          files=(desktop/release/*.dmg desktop/release/*.zip desktop/release/*.AppImage desktop/release/*.tar.gz)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "没有找到安装包"
+            exit 1
+          fi
+          gh release upload "$TAG" "${files[@]}" --clobber
