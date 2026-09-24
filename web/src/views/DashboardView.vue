@@ -83,7 +83,9 @@ const calendarCells = computed<(DayCell | null)[]>(() => {
   const daysInMonth = new Date(y, m + 1, 0).getDate();
   const hmap = holidayMap.value;
   const today = todayStr.value;
-  const paid = paidOrders.value;
+  const visible = orders.value.filter(
+    (o) => o.status !== 'refunded' && (!calPassenger.value || (o.passengers ?? []).includes(calPassenger.value)),
+  );
   const cells: (DayCell | null)[] = [];
   for (let i = 0; i < startWeekday; i++) cells.push(null);
   for (let d = 1; d <= daysInMonth; d++) {
@@ -91,13 +93,35 @@ const calendarCells = computed<(DayCell | null)[]>(() => {
     cells.push({
       day: d,
       date: dateStr,
-      tickets: paid.filter((o) => (o.travelDateTime ?? '').slice(0, 10) === dateStr),
+      tickets: visible.filter((o) => (o.travelDateTime ?? '').slice(0, 10) === dateStr),
       hol: hmap.get(dateStr),
       isToday: dateStr === today,
     });
   }
   return cells;
 });
+
+/** 日历格子按票面状态分行。待支付单独成行，已变更、已改签不并进已支付。 */
+const STATUS_RANK = ['待支付', '已支付', '已变更', '已改签'];
+function statusName(ticket: OrderRow): string {
+  const text = ticket.statusText || '';
+  if (ticket.status === 'unpaid' || text.includes('待支付')) return '待支付';
+  if (text.includes('变更')) return '已变更';
+  if (text.includes('改签')) return '已改签';
+  if (ticket.status === 'refunded' || text.includes('退票')) return '已退票';
+  return '已支付';
+}
+function statusLines(tickets: OrderRow[]): Array<{ name: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const ticket of tickets) counts.set(statusName(ticket), (counts.get(statusName(ticket)) ?? 0) + 1);
+  return [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => (STATUS_RANK.indexOf(a.name) < 0 ? 99 : STATUS_RANK.indexOf(a.name)) - (STATUS_RANK.indexOf(b.name) < 0 ? 99 : STATUS_RANK.indexOf(b.name)));
+}
+function departClock(ticket: OrderRow): string {
+  const clock = (ticket.travelDateTime ?? '').slice(11, 16);
+  return /^\d{2}:\d{2}$/.test(clock) ? clock : '时间待定';
+}
 
 const calTitle = computed(() => `${calMonth.value.getFullYear()} 年 ${calMonth.value.getMonth() + 1} 月`);
 const monthTicketCount = computed(() => calendarCells.value.reduce((n, c) => n + (c?.tickets.length ?? 0), 0));
@@ -108,6 +132,29 @@ const todayStr = computed(() => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 });
+
+/** 点格子打开当天列表，列表按出发时刻分段。点其中一张再看详情。 */
+const dayTickets = ref<OrderRow[]>([]);
+const dayDate = ref('');
+const dayOpen = ref(false);
+const dayGroups = computed(() => {
+  const groups = new Map<string, OrderRow[]>();
+  for (const ticket of dayTickets.value) {
+    const clock = departClock(ticket);
+    const rows = groups.get(clock) ?? [];
+    rows.push(ticket);
+    groups.set(clock, rows);
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([time, tickets]) => ({ time, tickets }));
+});
+function openDay(cell: DayCell): void {
+  if (!cell.tickets.length) return;
+  dayDate.value = cell.date;
+  dayTickets.value = cell.tickets;
+  dayOpen.value = true;
+}
 
 /** 点击车票弹出详情 */
 const ticketDetail = ref<OrderRow | null>(null);
@@ -363,7 +410,7 @@ function onVisible(): void {
             </span>
           </el-alert>
           <div style="font-size: 12px; color: #909399; margin-bottom: 6px">
-            本月已标记 <b style="color: #67c23a">{{ monthTicketCount }}</b> 张已支付车票{{ calPassenger ? `（乘车人：${calPassenger}）` : '' }}
+            本月已标记 <b style="color: #409eff">{{ monthTicketCount }}</b> 张车票{{ calPassenger ? `（乘车人：${calPassenger}）` : '' }}。点有票的日期查看当天全部车票。
           </div>
 
           <!-- 星期表头 -->
@@ -376,25 +423,14 @@ function onVisible(): void {
               <div
                 v-if="cell"
                 class="cal-cell"
-                :class="{
-                  'cal-today': cell.isToday,
-                }"
+                :class="{ 'cal-today': cell.isToday, 'cal-has-tickets': cell.tickets.length }"
+                :role="cell.tickets.length ? 'button' : undefined"
+                :tabindex="cell.tickets.length ? 0 : undefined"
+                @click="openDay(cell)"
+                @keydown.enter="openDay(cell)"
               >
                 <CalendarDayHeader :date="cell.date" :holiday="cell.hol" :today="cell.isToday" />
-                <div
-                  v-for="t in cell.tickets.slice(0, 1)"
-                  :key="[t.orderNo, t.travelDateTime, t.trainCode, t.fromStation, t.toStation, t.status].join('|')"
-                  class="cal-ticket cal-ticket-clickable"
-                  role="button"
-                  tabindex="0"
-                  @click="openTicketDetail(t)"
-                  @keydown.enter="openTicketDetail(t)"
-                >
-                  <span class="cal-train">{{ t.trainCode }}</span>
-                  <span class="cal-time">{{ (t.travelDateTime ?? '').slice(11) }}</span>
-                  <span class="cal-route">{{ t.fromStation }}→{{ t.toStation }}</span>
-                </div>
-                <div v-if="cell.tickets.length > 1" class="cal-more">+{{ cell.tickets.length - 1 }} 张</div>
+                <div v-for="line in statusLines(cell.tickets)" :key="line.name" class="cal-status">{{ line.name }} {{ line.count }}</div>
               </div>
               <div v-else class="cal-cell cal-blank" />
             </template>
@@ -420,6 +456,18 @@ function onVisible(): void {
       </el-col>
     </el-row>
 
+    <el-dialog v-model="dayOpen" :title="`${dayDate} 的车票`" width="520px">
+      <div v-for="group in dayGroups" :key="group.time" class="day-group">
+        <div class="day-time">{{ group.time }}</div>
+        <button v-for="ticket in group.tickets" :key="ticket.orderNo + ticket.fromStation + ticket.toStation + ticket.statusText" type="button" class="day-ticket" @click="openTicketDetail(ticket)">
+          <span>
+            <b>{{ ticket.trainCode }}</b>
+            {{ ticket.fromStation }} → {{ ticket.toStation }}
+          </span>
+          <span class="day-ticket-side">{{ ticket.statusText || statusName(ticket) }}<template v-if="ticket.totalPrice != null"> · ¥{{ ticket.totalPrice.toFixed(2) }}</template></span>
+        </button>
+      </div>
+    </el-dialog>
     <!-- 车票详情 -->
     <el-dialog v-model="ticketDetailVisible" title="车票详情" width="460px">
       <div v-if="ticketDetail" class="tk-detail">
@@ -507,11 +555,23 @@ function onVisible(): void {
 }
 .cal-cell {
   min-height: 64px;
+  height: auto;
   border: 1px solid #ebeef5;
   border-radius: 8px;
   padding: 3px 5px;
   background: #fff;
-  overflow: hidden;
+}
+.cal-has-tickets {
+  cursor: pointer;
+}
+.cal-has-tickets:hover {
+  border-color: #409eff;
+}
+.cal-status {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #409eff;
 }
 .cal-week {
   min-height: auto;
@@ -530,35 +590,35 @@ function onVisible(): void {
   border-color: #409eff;
   box-shadow: inset 0 0 0 1px #409eff;
 }
-.cal-ticket {
-  background: #f0f9eb;
-  border-left: 3px solid #67c23a;
-  border-radius: 3px;
-  padding: 1px 4px;
-  margin-bottom: 2px;
-  font-size: 10px;
-  line-height: 1.5;
-  color: #529b2e;
-  cursor: default;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.day-group + .day-group {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #ebeef5;
 }
-.cal-train {
+.day-time {
   font-weight: 700;
-  margin-right: 3px;
+  margin-bottom: 6px;
 }
-.cal-time {
-  color: #67c23a;
-  margin-right: 3px;
+.day-ticket {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  color: #303133;
+  cursor: pointer;
 }
-.cal-route {
-  color: #73767a;
+.day-ticket:hover {
+  color: #409eff;
 }
-.cal-more {
-  font-size: 10px;
+.day-ticket-side {
+  flex: none;
   color: #909399;
-  padding-left: 2px;
+  font-size: 12px;
 }
 /* ---- 右侧说明卡片 ---- */
 .note-card :deep(.el-card__body) {
@@ -570,15 +630,6 @@ function onVisible(): void {
   line-height: 1.7;
   font-size: 12px;
   color: #606266;
-}
-/* ---- 车票可点击 + 详情弹窗 ---- */
-.cal-ticket-clickable {
-  cursor: pointer;
-  transition: transform 0.08s ease, box-shadow 0.08s ease;
-}
-.cal-ticket-clickable:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 2px 6px rgba(103, 194, 58, 0.25);
 }
 .tk-detail {
   font-size: 14px;
