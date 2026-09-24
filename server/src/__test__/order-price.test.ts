@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeOrders } from '../bot/orders.js';
 import { fmtDay, ticketYuan, type RawTicket } from '../bot/orderApi.js';
-import { saleAtFromApi } from '../bot/tickets.js';
+import { parseTransferList, saleAtFromApi } from '../bot/tickets.js';
 // Synthetic prices; these are not a claim about G1716's actual fare.
 const ticket = (extra: Partial<RawTicket> = {}): RawTicket => ({ start_train_date_page:'2026-09-24 10:00', ticket_status_name:'已支付', passenger_name:'测试甲', seat_type_name:'二等座', ticket_price:31000, stationTrainDTO:{station_train_code:'G1716',from_station_name:'常州北',to_station_name:'信阳东'}, ...extra });
 test('prices stay with their own journey and ticket status', () => {
@@ -57,6 +57,25 @@ test('arrival uses the official destination date, including overnight and multi-
  assert.equal(epoch[0].arrivalDateTime,'2026-09-25 18:32');
  const epochOvernight=normalizeOrders([{sequence_no:'EPOCH',tickets:[ticket({start_train_date_page:'2026-09-25 13:03',stationTrainDTO:{station_train_code:'G1716',arrive_time:'1970-01-01 06:15:00'}})]}],[]);
  assert.equal(epochOvernight[0].arrivalDateTime,'2026-09-26 06:15');
+});
+
+test('transfer list keeps a connection, a same-train ride, and a marked supplement', () => {
+ const schemes=parseTransferList([
+  {from_station_name:'上海',middle_station_name:'郑州',end_station_name:'信阳',start_time:'08:00',arrive_time:'14:20',all_lishi:'06:20',wait_time:'00:25',same_train:'0',fullList:[
+    {station_train_code:'G1',from_station_name:'上海虹桥',to_station_name:'郑州东',start_time:'08:00',arrive_time:'12:10',lishi:'04:10',ze_num:'有'},
+    {station_train_code:'G2',from_station_name:'郑州东',to_station_name:'信阳东',start_time:'12:35',arrive_time:'14:20',lishi:'01:45',ze_num:'3'},
+  ]},
+  {from_station_name:'上海',middle_station_name:'南京南',end_station_name:'信阳',same_train:'1',fullList:[
+    {station_train_code:'K1107',from_station_name:'上海',to_station_name:'南京',start_time:'13:06',arrive_time:'16:00',lishi:'02:54'},
+    {station_train_code:'K1107',from_station_name:'南京',to_station_name:'信阳',start_time:'16:20',arrive_time:'02:17',lishi:'09:57'},
+  ]},
+  {is_bu_piao:'1',from_station_name:'上海',middle_station_name:'驻马店',end_station_name:'信阳',fullList:[
+    {station_train_code:'G3822',from_station_name:'上海松江',to_station_name:'驻马店',start_time:'13:49',arrive_time:'19:00',lishi:'05:11'},
+  ]},
+ ]);
+ assert.deepEqual(schemes.map(s=>s.label),['换乘','同车接续','补票']);
+ assert.equal(schemes[0].legs.length,2);
+ assert.equal(schemes[0].legs[0].seats['二等座'],'有');
 });
 
 test('sale clock is not attached to the travel date, and order dates use Beijing time', () => {

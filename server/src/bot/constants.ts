@@ -17,6 +17,8 @@ export const URLS = {
   CHECK_USER: 'https://kyfw.12306.cn/otn/login/checkUser',
   LEFT_TICKET_INIT: 'https://kyfw.12306.cn/otn/leftTicket/init',
   LEFT_TICKET_QUERY: 'https://kyfw.12306.cn/otn/leftTicket/queryZ',
+  /** 中转换乘 / 同车接续。页面须先停在查票页，否则没有查询 cookie。 */
+  LC_QUERY: 'https://kyfw.12306.cn/lcquery/queryG',
   QUERY_SALE_TIME: 'https://kyfw.12306.cn/otn/leftTicket/querySaleTime',
   CONFIRM_INIT_DC: 'https://kyfw.12306.cn/otn/confirmPassenger/initDc',
   /** 「我的订单」查询页（已完成订单）。POST 查询时页面必须停在此 URL 上——

@@ -155,10 +155,31 @@ export interface TrainOption {
   seats?: Record<string, string>;
 }
 
+export interface TravelScheme {
+  kind: 'transfer' | 'same-train' | 'supplement';
+  label: string;
+  fromStation: string;
+  middleStation: string;
+  toStation: string;
+  departTime: string;
+  arriveTime: string;
+  duration: string;
+  waitTime: string;
+  legs: Array<{
+    trainCode: string;
+    fromStation: string;
+    toStation: string;
+    departTime: string;
+    arriveTime: string;
+    duration: string;
+    seats: Record<string, string>;
+  }>;
+}
+
 export const metaApi = {
   seatTypes: () => http.get('/meta/seat-types').then((r) => r.data as SeatTypeOption[]),
   trains: (from: string, to: string, date: string) =>
-    http.get('/trains/search', { params: { from, to, date } }).then((r) => r.data as { trains: TrainOption[] }),
+    http.get('/trains/search', { params: { from, to, date } }).then((r) => r.data as { trains: TrainOption[]; schemes?: TravelScheme[] }),
 };
 
 // ---- 任务与日志 ----

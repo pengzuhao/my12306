@@ -374,10 +374,13 @@ export const planRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
     }
     try {
       const { getContext } = await import('../bot/session.js');
-      const { queryTrains } = await import('../bot/tickets.js');
+      const { queryTrains, queryTransfers } = await import('../bot/tickets.js');
       const ctx = await getContext(user.id);
-      const trains = await queryTrains(ctx, { trainDate: date, fromStation: from, toStation: to });
+      const query = { trainDate: date, fromStation: from, toStation: to };
+      const trains = await queryTrains(ctx, query);
+      const schemes = await queryTransfers(ctx, query);
       return {
+        schemes,
         trains: trains.map((t) => ({
           trainCode: t.trainCode,
           fromStation: t.fromStation,

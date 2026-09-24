@@ -103,6 +103,131 @@ export async function queryTrains(context: BrowserContext, params: QueryParams):
   }
 }
 
+export interface SchemeLeg {
+  trainCode: string;
+  fromStation: string;
+  toStation: string;
+  departTime: string;
+  arriveTime: string;
+  duration: string;
+  seats: Record<string, string>;
+}
+
+/** 直达之外的出行方案：换乘、同车接续，或接口标明的补票。 */
+export interface TravelScheme {
+  kind: 'transfer' | 'same-train' | 'supplement';
+  label: string;
+  fromStation: string;
+  middleStation: string;
+  toStation: string;
+  departTime: string;
+  arriveTime: string;
+  duration: string;
+  waitTime: string;
+  legs: SchemeLeg[];
+}
+
+const SCHEME_SEAT_FIELD: Record<string, string> = {
+  swz_num: '商务座',
+  tz_num: '特等座',
+  zy_num: '一等座',
+  ze_num: '二等座',
+  gr_num: '高级软卧',
+  rw_num: '软卧',
+  yw_num: '硬卧',
+  rz_num: '软座',
+  yz_num: '硬座',
+  wz_num: '无座',
+};
+
+function schemeSeats(leg: Record<string, unknown>): Record<string, string> {
+  const seats: Record<string, string> = {};
+  for (const [key, name] of Object.entries(SCHEME_SEAT_FIELD)) {
+    const value = leg[key];
+    if (value != null && String(value) !== '') seats[name] = String(value);
+  }
+  return seats;
+}
+
+/** 把 lcquery 的 middleList 收成可展示的方案。字段缺失的条目跳过，不让一页坏数据拖垮直达结果。 */
+export function parseTransferList(list: unknown): TravelScheme[] {
+  if (!Array.isArray(list)) return [];
+  const schemes: TravelScheme[] = [];
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const row = item as Record<string, unknown>;
+    const rawLegs = Array.isArray(row.fullList) ? row.fullList : [];
+    const legs: SchemeLeg[] = [];
+    for (const leg of rawLegs) {
+      if (!leg || typeof leg !== 'object') continue;
+      const part = leg as Record<string, unknown>;
+      const trainCode = String(part.station_train_code ?? '').trim();
+      if (!trainCode) continue;
+      legs.push({
+        trainCode,
+        fromStation: String(part.from_station_name ?? '').trim(),
+        toStation: String(part.to_station_name ?? '').trim(),
+        departTime: String(part.start_time ?? '').trim(),
+        arriveTime: String(part.arrive_time ?? '').trim(),
+        duration: String(part.lishi ?? '').trim(),
+        seats: schemeSeats(part),
+      });
+    }
+    if (!legs.length) continue;
+    const sameTrain = row.same_train === 1 || row.same_train === '1' || row.same_train === 'Y';
+    const supplement = row.is_bu_piao === 1 || row.is_bu_piao === '1' || String(row.scheme_type ?? '').includes('补');
+    const kind = supplement ? 'supplement' : sameTrain ? 'same-train' : 'transfer';
+    schemes.push({
+      kind,
+      label: kind === 'supplement' ? '补票' : kind === 'same-train' ? '同车接续' : '换乘',
+      fromStation: String(row.from_station_name ?? legs[0].fromStation),
+      middleStation: String(row.middle_station_name ?? ''),
+      toStation: String(row.end_station_name ?? legs[legs.length - 1].toStation),
+      departTime: String(row.start_time ?? legs[0].departTime),
+      arriveTime: String(row.arrive_time ?? legs[legs.length - 1].arriveTime),
+      duration: String(row.all_lishi ?? ''),
+      waitTime: String(row.wait_time ?? ''),
+      legs,
+    });
+  }
+  return schemes;
+}
+
+/** 查询中转换乘。失败返回空列表，直达查询仍然可用。 */
+export async function queryTransfers(
+  context: BrowserContext,
+  params: QueryParams,
+): Promise<TravelScheme[]> {
+  const { stationCode } = await import('./stations.js');
+  const fromCode = await stationCode(params.fromStation);
+  const toCode = await stationCode(params.toStation);
+  if (!fromCode || !toCode) return [];
+  const url =
+    `${URLS.LC_QUERY}?train_date=${params.trainDate}` +
+    `&from_station_telecode=${fromCode}` +
+    `&to_station_telecode=${toCode}` +
+    `&middle_station=&result_index=0&can_query=Y&isShowWZ=Y&purpose_codes=00&channel=E`;
+  const page = await context.newPage();
+  try {
+    await page.goto(URLS.LEFT_TICKET_INIT, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    const raw = await page.evaluate(async (u: string) => {
+      const res = await fetch(u, { credentials: 'include', signal: AbortSignal.timeout(15000) });
+      if (!res.ok) throw new Error(`换乘接口 HTTP ${res.status}`);
+      return res.text();
+    }, url);
+    const data = JSON.parse(raw) as { data?: { middleList?: unknown } | string };
+    if (!data?.data || typeof data.data === 'string') return [];
+    const schemes = parseTransferList(data.data.middleList);
+    logger.info('换乘查询完成', { date: params.trainDate, from: params.fromStation, to: params.toStation, count: schemes.length });
+    return schemes;
+  } catch (e) {
+    logger.warn('换乘查询失败', e);
+    return [];
+  } finally {
+    await page.close().catch(() => undefined);
+  }
+}
+
 /** 从起售接口拼出北京时间。时刻若自带日期就用该日期；否则用响应里的开售日。响应日与乘车日相同或缺失时，按预售期回推，避免把开售时刻标到出发当天。 */
 export function saleAtFromApi(travelDate: string, saleTime: string, responseTrainDate?: string): string | null {
   const text = saleTime.trim();
