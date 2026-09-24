@@ -165,23 +165,31 @@ interface OrderCheck {
   blockingUnpaid?: { orderNo: string; date: string; trainCode: string };
 }
 
+function sameSegment(key: string, day: string, code: string, from: string, to: string): boolean {
+  const [d = '', c = '', fromStation = '', toStation = ''] = key.split('|');
+  return d.slice(0, 8) === day && c === code && fromStation === from && toStation === to;
+}
+
 async function checkOrders(
   context: BrowserContext,
   trainDate: string,
   trainCode: string,
+  fromStation: string,
+  toStation: string,
 ): Promise<OrderCheck | null> {
   const purchased = await queryPurchasedTickets(context);
   if (!purchased) return null;
-  // key 的日期部分可能带时间（"202609280652|D5"），统一只取前 8 位日期比较
   const day = trainDate.replace(/\D/g, '').slice(0, 8);
   const code = trainCode.replace(/\s/g, '').toUpperCase();
-  const hit = [...purchased.entries()].find(([k]) => k.slice(0, 8) === day && k.split('|')[1] === code);
+  const from = fromStation.trim();
+  const to = toStation.trim();
+  const hit = [...purchased.entries()].find(([k]) => sameSegment(k, day, code, from, to));
   if (hit) return { duplicated: { orderNo: hit[1].orderNo, paid: hit[1].status === 'paid', payLimitTs: hit[1].payLimitTs } };
-  // 12306 只允许一个未支付订单：同日不同车次、以及其他日期的未支付订单都会拦死新订单
+  // 12306 只允许一个未支付订单。同车次的另一段（同车接续）不是重复票，不能在这里放行成已购。
   for (const [k, v] of purchased) {
     if (v.status !== 'unpaid') continue;
+    if (sameSegment(k, day, code, from, to)) continue;
     const [d, c] = k.split('|');
-    if (d.slice(0, 8) === day && c === code) continue;
     return { blockingUnpaid: { orderNo: v.orderNo, date: d.slice(0, 8), trainCode: c } };
   }
   return null;
@@ -312,7 +320,7 @@ export async function purchaseTicket(context: BrowserContext, params: PurchasePa
     // 1.5) 查重 + 未支付订单冲突检测
     //   - 同日同车次已购 → 跳过下单，当日计划标记完成
     //   - 存在其他日期的未支付订单 → 12306 拦截新订单，必须先处理掉
-    const orderCheck = await checkOrders(context, params.trainDate, train.trainCode);
+    const orderCheck = await checkOrders(context, params.trainDate, train.trainCode, train.fromStation, train.toStation);
     if (orderCheck?.duplicated) {
       const dup = orderCheck.duplicated;
       logger.info('已存在同车次已购车票，跳过下单', { train: train.trainCode, orderNo: dup.orderNo, paid: dup.paid, payLimitTs: dup.payLimitTs });

@@ -39,6 +39,10 @@ export interface RawTicket {
   seat_type_name?: string;
   coach_name?: string;
   seat_name?: string;
+  /** 退票定位：批次、车厢、席位。12306 退票接口按这三项加订单号提交。 */
+  batch_no?: string;
+  coach_no?: string;
+  seat_no?: string;
   /** 未完成订单的票价（元）；已完成订单不返回此字段 */
   price?: number | string;
   /** 已完成订单的票价（分），如 13600 = ¥136.00 */

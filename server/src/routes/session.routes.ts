@@ -9,6 +9,7 @@ import { Logger } from '../logger.js';
 import { wsHub } from '../ws/hub.js';
 import {
   getSessionState,
+  rememberRailwayUserName,
   startQrLogin,
   getQrLogin,
   refreshQrLogin,
@@ -26,6 +27,7 @@ export const sessionRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts
   /** 会话状态 */
   app.get('/api/session', async (request) => {
     const user = currentUser(request);
+    await rememberRailwayUserName(user.id).catch(() => undefined);
     return getSessionState(user.id);
   });
 

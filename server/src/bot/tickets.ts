@@ -110,7 +110,11 @@ export interface SchemeLeg {
   departTime: string;
   arriveTime: string;
   duration: string;
+  /** 这一程的乘车日期。接口给出就用，没有则由界面按时刻跨日推算。 */
+  date: string;
   seats: Record<string, string>;
+  /** 这一程实际有票的席别代码，不含商务座和无座。 */
+  seatTypes: string[];
 }
 
 /** 直达之外的出行方案：换乘、同车接续，或接口标明的补票。 */
@@ -140,6 +144,24 @@ const SCHEME_SEAT_FIELD: Record<string, string> = {
   wz_num: '无座',
 };
 
+const SEAT_CODE: Record<string, string> = {
+  特等座: 'TZ', 一等座: 'ZY', 二等座: 'ZE', 高级软卧: 'GR', 软卧: 'RW', 硬卧: 'YW', 软座: 'RZ', 硬座: 'YZ',
+};
+
+function legDate(value: unknown): string {
+  const text = String(value ?? '').trim();
+  const match = /^(\d{4})\D(\d{1,2})\D(\d{1,2})/.exec(text) ?? /^(\d{4})(\d{2})(\d{2})$/.exec(text);
+  if (!match) return '';
+  return `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`;
+}
+
+function seatCodes(seats: Record<string, string>): string[] {
+  return Object.entries(seats)
+    .filter(([name, count]) => name !== '商务座' && name !== '无座' && count !== '' && count !== '无' && count !== '--')
+    .map(([name]) => SEAT_CODE[name])
+    .filter((code): code is string => Boolean(code));
+}
+
 function schemeSeats(leg: Record<string, unknown>): Record<string, string> {
   const seats: Record<string, string> = {};
   for (const [key, name] of Object.entries(SCHEME_SEAT_FIELD)) {
@@ -163,6 +185,10 @@ export function parseTransferList(list: unknown): TravelScheme[] {
       const part = leg as Record<string, unknown>;
       const trainCode = String(part.station_train_code ?? '').trim();
       if (!trainCode) continue;
+      const seats = schemeSeats(part);
+      const fallbackDate = legs.length === 0
+        ? legDate(row.start_date ?? row.train_date)
+        : legDate(row.middle_date ?? row.middle_station_date);
       legs.push({
         trainCode,
         fromStation: String(part.from_station_name ?? '').trim(),
@@ -170,7 +196,9 @@ export function parseTransferList(list: unknown): TravelScheme[] {
         departTime: String(part.start_time ?? '').trim(),
         arriveTime: String(part.arrive_time ?? '').trim(),
         duration: String(part.lishi ?? '').trim(),
-        seats: schemeSeats(part),
+        date: legDate(part.start_date ?? part.train_date ?? part.start_train_date) || fallbackDate,
+        seats,
+        seatTypes: seatCodes(seats),
       });
     }
     if (!legs.length) continue;

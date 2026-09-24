@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS plans (
   seat_positions TEXT,                                    -- JSON 数组：座位偏好 A/B/C/D/F（可空=不指定）
   allow_no_seat  INTEGER NOT NULL DEFAULT 0,              -- 是否允许购买无座票（0=不允许，1=允许）
   passenger_ids  TEXT NOT NULL,                           -- JSON 数组：乘车人 ID
+  depends_on_plan_id TEXT,                                -- 换乘后一程依赖的前一程计划 ID
   created_at     TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE

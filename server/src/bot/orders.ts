@@ -21,6 +21,7 @@ import {
   type RawTicket,
 } from './orderApi.js';
 import { Logger } from '../logger.js';
+import { groupJourneys } from './journey.js';
 
 const logger = new Logger('bot');
 
@@ -48,6 +49,12 @@ export interface OrderRow {
   payLimitTime: string | null;
   /** 支付截止时间的毫秒时间戳（前端据此做「确定刷新节点」） */
   payLimitTs: number | null;
+  /** 同一换乘行程的几张票共用。单程为空。 */
+  journeyId: string | null;
+  /** 行程内第几程，从 1 开始。 */
+  legIndex: number;
+  /** 退票定位，每人一张。 */
+  refundTickets: Array<{ passenger: string; batchNo: string; coachNo: string; seatNo: string }>;
 }
 
 /**
@@ -134,6 +141,7 @@ interface AccumOrder {
   totalPrice: number | null;
   payLimitTime: string | null;
   payLimitTs: number | null;
+  refundTickets: OrderRow['refundTickets'];
 }
 
 /** 同一订单按乘车日期、车次、区间和票面状态分组，避免串票价。 */
@@ -185,6 +193,12 @@ function ingestOrders(
         totalPrice: total,
         payLimitTime,
         payLimitTs: parseCnTimestamp(payLimitTime),
+        refundTickets: tickets.map((t) => ({
+          passenger: String(t.passenger_name ?? t.passengerDTO?.passenger_name ?? '').trim(),
+          batchNo: String(t.batch_no ?? '').trim(),
+          coachNo: String(t.coach_no ?? '').trim(),
+          seatNo: String(t.seat_no ?? '').trim(),
+        })).filter((t) => t.passenger),
       });
     }
   }
@@ -233,6 +247,9 @@ function toRow(a: AccumOrder): OrderRow {
     totalPrice: a.totalPrice,
     payLimitTime: a.payLimitTime,
     payLimitTs: a.payLimitTs,
+    journeyId: null,
+    legIndex: 1,
+    refundTickets: a.refundTickets,
   };
 }
 
@@ -241,7 +258,7 @@ export function normalizeOrders(completed: RawOrder[], incomplete: RawOrder[]): 
   const map = new Map<string, AccumOrder>();
   ingestOrders(completed, map, false);
   ingestOrders(incomplete, map, true);
-  return [...map.values()].map(toRow);
+  return groupJourneys([...map.values()].map(toRow));
 }
 
 /**
@@ -286,7 +303,7 @@ export async function queryOrders(context: BrowserContext): Promise<OrderRow[]> 
     if (!anyOk) throw new Error('12306 订单查询失败（未完成与已完成接口均无响应，可能登录已失效）');
     if (!incompleteOk) throw new Error('未完成订单查询未确认');
 
-    const rows = [...map.values()].map(toRow);
+    const rows = groupJourneys([...map.values()].map(toRow));
     rows.sort((a, b) => {
       // 待支付置顶，按支付截止时间升序
       if (a.status === 'unpaid' && b.status !== 'unpaid') return -1;

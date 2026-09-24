@@ -65,9 +65,9 @@ test('transfer list keeps a connection, a same-train ride, and a marked suppleme
     {station_train_code:'G1',from_station_name:'上海虹桥',to_station_name:'郑州东',start_time:'08:00',arrive_time:'12:10',lishi:'04:10',ze_num:'有'},
     {station_train_code:'G2',from_station_name:'郑州东',to_station_name:'信阳东',start_time:'12:35',arrive_time:'14:20',lishi:'01:45',ze_num:'3'},
   ]},
-  {from_station_name:'上海',middle_station_name:'南京南',end_station_name:'信阳',same_train:'1',fullList:[
-    {station_train_code:'K1107',from_station_name:'上海',to_station_name:'南京',start_time:'13:06',arrive_time:'16:00',lishi:'02:54'},
-    {station_train_code:'K1107',from_station_name:'南京',to_station_name:'信阳',start_time:'16:20',arrive_time:'02:17',lishi:'09:57'},
+  {from_station_name:'上海',middle_station_name:'南京南',end_station_name:'信阳',same_train:'1',middle_date:'2026-09-26',fullList:[
+    {station_train_code:'K1107',from_station_name:'上海',to_station_name:'南京',start_time:'13:06',arrive_time:'16:00',lishi:'02:54',start_date:'2026-09-25',yz_num:'有'},
+    {station_train_code:'K1107',from_station_name:'南京',to_station_name:'信阳',start_time:'16:20',arrive_time:'02:17',lishi:'09:57',yw_num:'5'},
   ]},
   {is_bu_piao:'1',from_station_name:'上海',middle_station_name:'驻马店',end_station_name:'信阳',fullList:[
     {station_train_code:'G3822',from_station_name:'上海松江',to_station_name:'驻马店',start_time:'13:49',arrive_time:'19:00',lishi:'05:11'},
@@ -76,6 +76,10 @@ test('transfer list keeps a connection, a same-train ride, and a marked suppleme
  assert.deepEqual(schemes.map(s=>s.label),['换乘','同车接续','补票']);
  assert.equal(schemes[0].legs.length,2);
  assert.equal(schemes[0].legs[0].seats['二等座'],'有');
+ assert.deepEqual(schemes[0].legs[0].seatTypes,['ZE']);
+ assert.equal(schemes[1].legs[1].date,'2026-09-26');
+ assert.deepEqual(schemes[1].legs[1].seatTypes,['YW']);
+ assert.equal(schemes[1].legs[0].date,'2026-09-25');
 });
 
 test('sale clock is not attached to the travel date, and order dates use Beijing time', () => {

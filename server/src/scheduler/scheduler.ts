@@ -277,7 +277,7 @@ async function reconcileBeforeSale(): Promise<void> {
         const dates = PlanDatesRepo.list(plan.id).filter((d) => d.status === 'done' && d.travelDate >= todayStr);
         for (const d of dates) {
           if (PlanDateSkipsRepo.has(plan.id, d.travelDate)) continue;
-          if (planStillHolds(purchased, d.travelDate, plan.trainNumbers)) continue;
+          if (planStillHolds(purchased, d.travelDate, plan.trainNumbers, plan.trainSegments)) continue;
           PlanDatesRepo.markPending(plan.id, d.travelDate);
           const tasks = TasksRepo.findByPlanDate(plan.id, d.travelDate);
           for (const t of tasks) {
@@ -294,26 +294,45 @@ async function reconcileBeforeSale(): Promise<void> {
   }
 }
 
-/** 计划是否还握着该日车票。指定了车次就只认这些车次；没指定才按当天任意车次。 */
-function planStillHolds(purchased: Map<string, { orderNo: string; status: string }>, travelDate: string, trainNumbers: string[] | null): boolean {
-  const prefix = `${travelDate.replace(/\D/g, '').slice(0, 8)}|`;
-  const codes = (trainNumbers ?? []).map((c) => c.replace(/\s/g, '').toUpperCase()).filter(Boolean);
+/** 已购键：日期|车次|上车站|下车站。同车接续两段车次相同，必须用车站分开。 */
+function ticketMatches(
+  key: string,
+  travelDate: string,
+  trainNumbers: string[] | null,
+  segments: Array<{ trainCode: string; fromStation: string; toStation: string }> | null | undefined,
+): boolean {
+  const [d = '', c = '', from = '', to = ''] = key.split('|');
+  if (d.slice(0, 8) !== travelDate.replace(/\D/g, '').slice(0, 8)) return false;
+  const codes = (trainNumbers ?? []).map((code) => code.replace(/\s/g, '').toUpperCase()).filter(Boolean);
+  if (codes.length && !codes.includes(c)) return false;
+  const segs = segments ?? [];
+  if (segs.length && !segs.some((s) => s.trainCode.replace(/\s/g, '').toUpperCase() === c && s.fromStation === from && s.toStation === to)) return false;
+  return true;
+}
+
+/** 计划是否还握着该日这一段车票。指定了区间就只认这段，避免同车另一段被当成已买到。 */
+function planStillHolds(
+  purchased: Map<string, { orderNo: string; status: string }>,
+  travelDate: string,
+  trainNumbers: string[] | null,
+  segments?: Array<{ trainCode: string; fromStation: string; toStation: string }>,
+): boolean {
   for (const key of purchased.keys()) {
-    if (!key.startsWith(prefix)) continue;
-    if (!codes.length || codes.includes(key.slice(prefix.length))) return true;
+    if (ticketMatches(key, travelDate, trainNumbers, segments)) return true;
   }
   return false;
 }
 
-/** 已购集合里该日期、且属于本计划车次的车票（支付到期检查用） */
-function entriesForDate(purchased: Map<string, PurchasedTicket>, travelDate: string, trainNumbers: string[] | null): PurchasedTicket[] {
-  const prefix = `${travelDate.replace(/\D/g, '').slice(0, 8)}|`;
-  const codes = (trainNumbers ?? []).map((c) => c.replace(/\s/g, '').toUpperCase()).filter(Boolean);
+/** 已购集合里该日期、且属于本计划区间的车票（支付到期检查用） */
+function entriesForDate(
+  purchased: Map<string, PurchasedTicket>,
+  travelDate: string,
+  trainNumbers: string[] | null,
+  segments?: Array<{ trainCode: string; fromStation: string; toStation: string }>,
+): PurchasedTicket[] {
   const out: PurchasedTicket[] = [];
   for (const [key, v] of purchased) {
-    if (!key.startsWith(prefix)) continue;
-    if (codes.length && !codes.includes(key.slice(prefix.length))) continue;
-    out.push(v);
+    if (ticketMatches(key, travelDate, trainNumbers, segments)) out.push(v);
   }
   return out;
 }
@@ -381,7 +400,7 @@ async function onPayDeadlineReached(task: Task, plan: Plan, recheck: number): Pr
     return;
   }
 
-  const hits = entriesForDate(purchased, task.travelDate, task.trainNumber ? [task.trainNumber] : plan.trainNumbers);
+  const hits = entriesForDate(purchased, task.travelDate, task.trainNumber ? [task.trainNumber] : plan.trainNumbers, plan.trainSegments);
   if (hits.length) {
     // 票还在：用户可能已支付，或 12306 还没来得及取消未支付订单
     if (hits.every((h) => h.status === 'paid')) {
@@ -449,6 +468,20 @@ function isTransientFailure(error?: string | null): boolean {
   return error.includes('未进入确认页') || error.includes('UAM') || error.includes('超时');
 }
 
+/** 换乘后一程：前一程已支付才买。前一程失败则本程取消；未支付或还没跑完则稍后重试。 */
+function earlierLegGate(plan: Plan): 'wait' | 'skip' | null {
+  if (!plan.dependsOnPlanId) return null;
+  const prev = PlansRepo.get(plan.dependsOnPlanId);
+  if (!prev || prev.status === 'deleted') return 'skip';
+  if (prev.status === 'paused' || !prev.travelDate) return 'wait';
+  const tasks = TasksRepo.findByPlanDate(prev.id, prev.travelDate);
+  const task = tasks.find((item) => item.status !== 'cancelled') ?? tasks[0];
+  if (!task) return 'wait';
+  if (task.status === 'failed' || task.status === 'skipped') return 'skip';
+  if (task.status === 'success') return task.result?.paid === false ? 'wait' : null;
+  return 'wait';
+}
+
 /** 执行单个购票任务（含退避重试） */
 async function runTask(task: Task): Promise<void> {
   if (!userCanRun(task.userId) || PlanDateSkipsRepo.has(task.planId, task.travelDate)) return;
@@ -476,6 +509,18 @@ async function runTask(task: Task): Promise<void> {
       return;
     }
     if (PlanDateSkipsRepo.has(task.planId, task.travelDate) || TasksRepo.get(task.id)?.status !== 'queried' || PlansRepo.get(plan.id)?.status !== 'active') return;
+    const gate = earlierLegGate(plan);
+    if (gate === 'skip') {
+      TasksRepo.update(task.id, { status: 'skipped', error: '前一程未买到，本程不再购买', finishedAt: new Date().toISOString() });
+      wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
+      return;
+    }
+    if (gate === 'wait') {
+      const retryAt = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+      TasksRepo.update(task.id, { status: 'queried', saleAt: retryAt, error: '等待前一程支付完成', finishedAt: null });
+      wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
+      return;
+    }
     TasksRepo.update(task.id, { status: 'queued', startedAt: null });
     wsHub.broadcastToUser(task.userId, { type: 'task', payload: TasksRepo.get(task.id) });
 

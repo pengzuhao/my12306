@@ -8,7 +8,10 @@ import { sessionState } from '../store/session';
 import { todayCn, isPastDate } from '../utils/time';
 import { trainSearchErrorMessage } from '../utils/train-query-error';
 
+defineOptions({ name: 'TrainsView' });
+
 const router = useRouter();
+const TRANSFER_DRAFT_KEY = 'my12306-transfer-draft';
 
 /** 查询表单 */
 const form = reactive({
@@ -117,14 +120,35 @@ function newPlanWithTrain(t: TrainOption): void {
   });
 }
 
-/** 购票计划一次只买一趟。方案里的第一程可以单独加入。 */
-function newPlanWithLeg(scheme: TravelScheme): void {
-  const leg = scheme.legs[0];
-  if (!leg) return;
-  router.push({
-    path: '/plans',
-    query: { from: leg.fromStation, to: leg.toStation, date: form.date, train: leg.trainCode },
+function nextDay(date: string): string {
+  const d = new Date(`${date}T12:00:00`);
+  d.setDate(d.getDate() + 1);
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+/** 换乘的每一程都是独立购票计划：站点不同，不能塞进同一个出发到达站。 */
+function newPlanWithScheme(scheme: TravelScheme): void {
+  if (!scheme.legs.length || !form.date) return;
+  let date = form.date;
+  let previous = '';
+  const legs = scheme.legs.map((leg) => {
+    const explicit = /^\d{4}-\d{2}-\d{2}$/.test(leg.date ?? '') ? leg.date! : '';
+    const depart = leg.departTime || '00:00';
+    if (explicit) date = explicit;
+    else if (previous && depart < previous) date = nextDay(date);
+    previous = leg.arriveTime || depart;
+    return {
+      trainCode: leg.trainCode,
+      fromStation: leg.fromStation,
+      toStation: leg.toStation,
+      date,
+      seatTypes: leg.seatTypes ?? [],
+    };
   });
+  sessionStorage.setItem(TRANSFER_DRAFT_KEY, JSON.stringify(legs));
+  router.push({ path: '/plans', query: { transfer: '1' } });
 }
 
 onMounted(async () => {
@@ -221,7 +245,7 @@ onMounted(async () => {
         </template>
       </el-table-column>
     </el-table>
-    <p v-if="schemes.length" class="sub-hint">换乘 / 同车接续 / 补票 · {{ schemes.length }} 个方案。购票计划一次只买一趟，这里只能把第一程加入计划。</p>
+    <p v-if="schemes.length" class="sub-hint">换乘 / 同车接续 / 补票 · {{ schemes.length }} 个方案。一次会为每一程各建一个购票计划。</p>
     <el-table v-if="schemes.length" :data="schemes" border style="margin-top: 8px">
       <el-table-column label="方案" prop="label" width="100" />
       <el-table-column label="行程" min-width="280">
@@ -241,9 +265,9 @@ onMounted(async () => {
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="120" fixed="right">
+      <el-table-column label="操作" width="140" fixed="right">
         <template #default="{ row }">
-          <el-button size="small" plain @click="newPlanWithLeg(row)">加入第一程</el-button>
+          <el-button size="small" type="primary" plain @click="newPlanWithScheme(row)">加入全部行程</el-button>
         </template>
       </el-table-column>
     </el-table>

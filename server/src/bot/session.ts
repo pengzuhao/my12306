@@ -12,6 +12,8 @@ import { RailwayAccountRepo } from '../db/repo.js';
 import { Logger } from '../logger.js';
 import { wsHub } from '../ws/hub.js';
 import { URLS, SELECTORS } from './constants.js';
+import { loginNameFromApiText } from './login-name.js';
+import { warmOrderPage } from './orderApi.js';
 import { createContextForUser, closeContext, saveStorageState } from './browser.js';
 import { notifySessionInvalid } from '../notify/feishu.js';
 import { QrAttempt, runQrLogin, type QrSnapshot } from './qr-login.js';
@@ -237,19 +239,42 @@ async function readQrImage(page: Page): Promise<string | null> {
   }
 }
 
-/** 登录成功后读取 12306 用户名（从首页或个人中心，仅展示用） */
-async function readRailwayUserName(page: Page): Promise<string | null> {
+/** 登录账号在 /otn/login/conf 的 user_name。页面必须先完成 UAM 并停在 kyfw 订单页，首页会跳到 www，跨域读不到。 */
+export async function readRailwayUserName(page: Page): Promise<string | null> {
   try {
-    await page.goto(URLS.INDEX, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => undefined);
-    const name = await page
-      .$eval('.welcome .username, .u_username, .user-name, [class*="userName"]', (el) => {
-        const t = (el.textContent ?? '').trim();
-        return t || null;
-      })
-      .catch(() => null);
-    return name && name.length <= 40 ? name : null;
+    if (!page.url().includes('/otn/queryOrder/init')) await warmOrderPage(page);
+    const raw = await page.evaluate(async (url: string) => {
+      const res = await fetch(url, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: '_json_att=',
+      });
+      return res.ok ? await res.text() : '';
+    }, URLS.LOGIN_CONF);
+    return loginNameFromApiText(raw);
   } catch {
     return null;
+  }
+}
+
+const nameLookupFailed = new Set<string>();
+
+/** 已连接但库里没有登录名时补一次，供顶栏显示。失败后本进程不再反复打开浏览器。 */
+export async function rememberRailwayUserName(userId: string): Promise<void> {
+  const acc = RailwayAccountRepo.get(userId);
+  if (!acc || acc.status !== 'active' || acc.username || nameLookupFailed.has(userId)) return;
+  const ctx = contexts.get(userId) ?? await getContext(userId);
+  const page = await ctx.newPage();
+  try {
+    const name = await readRailwayUserName(page);
+    if (name) RailwayAccountRepo.upsert(userId, name);
+    else nameLookupFailed.add(userId);
+  } finally {
+    await page.close().catch(() => undefined);
   }
 }
 
