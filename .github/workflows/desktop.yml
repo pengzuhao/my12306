@@ -65,13 +65,48 @@ jobs:
           python-version: '3.12'
       - if: runner.os == 'macOS' && env.DESKTOP_SIGNING == 'unsigned'
         run: npm --prefix desktop run bundle:macos
+      - run: node desktop/scripts/stage-release.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: my12306-${{ runner.os }}-${{ matrix.arch }}-${{ env.DESKTOP_SIGNING }}
-          path: |
-            desktop/release/*.dmg
-            desktop/release/*.zip
-            desktop/release/*.exe
-            desktop/release/*.blockmap
-            desktop/release/*-bundle.zip.sha256
+          path: desktop/delivery/*
+          compression-level: 0
           if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: my12306-*
+          path: delivery
+          merge-multiple: true
+      - name: Publish installers to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DESKTOP_SIGNING: ${{ github.event_name == 'workflow_dispatch' && inputs.signing || vars.DESKTOP_SIGNING || 'unsigned' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd delivery
+          for checksum in *.sha256; do sha256sum -c "$checksum"; done
+          count=$(find . -maxdepth 1 -type f ! -name '*.sha256' | wc -l)
+          test "$count" -eq 3
+          cd ..
+          version=$(node -p "require('./desktop/app/package.json').version")
+          if [[ "$GITHUB_REF" == refs/tags/desktop-v* ]]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="desktop-v${version}-build.${GITHUB_RUN_ID}"
+          fi
+          printf '安装包对应提交：%s\n\nMac：下载对应架构的 bundle.zip，解压后按使用说明安装。签名版本直接下载 DMG。\nWindows：下载 EXE 安装。\n\n签名模式：%s。SHA-256 校验文件与安装包一同提供。\n' "$GITHUB_SHA" "$DESKTOP_SIGNING" > release-notes.md
+          flags=()
+          if [[ "$DESKTOP_SIGNING" == unsigned ]]; then flags+=(--prerelease); fi
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --target "$GITHUB_SHA" --title "my12306 ${version} · build ${GITHUB_RUN_ID}" --notes-file release-notes.md --draft "${flags[@]}"
+          fi
+          gh release upload "$tag" delivery/* --clobber
+          gh release edit "$tag" --draft=false

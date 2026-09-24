@@ -15,7 +15,7 @@ module.exports = {
   // Desktop always runs headless; never ship the second, unused full Chrome binary.
   extraResources: [{ from: '.cache/browsers', to: 'browsers', filter: ['chromium_headless_shell-*/**', 'ffmpeg-*/**'] }],
   artifactName: '${productName}-${version}-${os}-${arch}' + (mode === 'auto' ? '' : `-${mode}`) + '.${ext}',
-  mac: { category: 'public.app-category.utilities', target: ['dmg', 'zip'], icon: 'assets/icon.icns', hardenedRuntime: !unsigned, ...(unsigned ? { identity: null, notarize: false } : mode === 'signed' ? { notarize: true } : {}), entitlements: 'assets/entitlements.mac.plist', entitlementsInherit: 'assets/entitlements.mac.plist' },
+  mac: { category: 'public.app-category.utilities', target: ['dmg'], icon: 'assets/icon.icns', hardenedRuntime: !unsigned, ...(unsigned ? { identity: null, notarize: false } : mode === 'signed' ? { notarize: true } : {}), entitlements: 'assets/entitlements.mac.plist', entitlementsInherit: 'assets/entitlements.mac.plist' },
   win: { ...(unsigned ? { signExecutable: false } : {}), target: ['nsis'], icon: 'assets/icon.ico' },
   dmg: { format: 'ULFO' },
   nsis: { oneClick: false, perMachine: false, allowToChangeInstallationDirectory: true, createDesktopShortcut: true, deleteAppDataOnUninstall: false },
